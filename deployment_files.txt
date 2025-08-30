@@ -1,0 +1,96 @@
+# ====================================================================
+# ARCHIVOS NECESARIOS PARA DESPLEGAR EN STREAMLIT CLOUD (GRATIS)
+# ====================================================================
+
+# FILE: requirements.txt
+streamlit>=1.28.0
+pandas>=1.5.0
+numpy>=1.21.0
+plotly>=5.15.0
+yfinance>=0.2.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# ====================================================================
+# FILE: .streamlit/config.toml
+# ====================================================================
+[theme]
+primaryColor = "#1f4e79"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+
+[server]
+headless = true
+port = 8501
+enableCORS = false
+enableXsrfProtection = false
+
+# ====================================================================
+# PASOS PARA DESPLEGAR EN STREAMLIT CLOUD (100% GRATIS):
+# ====================================================================
+
+1. CREAR REPOSITORIO EN GITHUB:
+   - Ir a github.com y crear nuevo repositorio
+   - Subir app.py y requirements.txt
+   - Hacer commit
+
+2. DESPLEGAR EN STREAMLIT CLOUD:
+   - Ir a share.streamlit.io
+   - Conectar con tu cuenta de GitHub
+   - Seleccionar el repositorio
+   - ¡La app estará disponible en internet!
+
+3. URL EJEMPLO:
+   https://tu-usuario-random-forest-markowitz-app-streamlit-app.streamlit.app
+
+# ====================================================================
+# ALTERNATIVA: DESPLIEGUE EN HEROKU
+# ====================================================================
+
+# FILE: Procfile
+web: sh setup.sh && streamlit run app.py --server.port=$PORT --server.address=0.0.0.0
+
+# FILE: setup.sh
+mkdir -p ~/.streamlit/
+
+echo "\
+[general]\n\
+email = \"tu-email@ejemplo.com\"\n\
+" > ~/.streamlit/credentials.toml
+
+echo "\
+[server]\n\
+headless = true\n\
+enableCORS=false\n\
+port = $PORT\n\
+" > ~/.streamlit/config.toml
+
+# ====================================================================
+# DOCKERFILE PARA DOCKER/AWS/GCP
+# ====================================================================
+
+FROM python:3.9-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+COPY . .
+
+EXPOSE 8501
+
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+
+ENTRYPOINT ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+# ====================================================================
+# COMANDOS DOCKER
+# ====================================================================
+
+# Construir imagen
+docker build -t rf-markowitz-app .
+
+# Ejecutar contenedor
+docker run -p 8501:8501 rf-markowitz-app
