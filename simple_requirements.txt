@@ -1,0 +1,8 @@
+# Requirements.txt - Versión Simplificada para Streamlit Cloud
+streamlit
+pandas
+numpy
+plotly
+yfinance
+scikit-learn
+scipy
