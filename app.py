@@ -133,7 +133,17 @@ def download_macro_data(start_date, end_date):
             st.warning(f"No se pudo descargar {name}: {str(e)[:50]}")
             continue
     
-    return pd.DataFrame(macro_data) if macro_data else None
+    # FIX: Verificar que macro_data no esté vacío antes de crear DataFrame
+    if macro_data:
+        try:
+            return pd.DataFrame(macro_data)
+        except ValueError:
+            # Si hay error creando DataFrame, retornar None
+            st.warning("Error creando DataFrame de datos macro")
+            return None
+    else:
+        st.info("No se pudieron descargar datos macroeconómicos - continuando sin ellos")
+        return None
 
 def create_fallback_data(tickers, start_date, end_date):
     """Crea datos simulados si la descarga falla"""
@@ -735,18 +745,26 @@ def main():
             technical_features = calculate_technical_indicators(asset_prices)
             
             # Combinar con macro si está disponible
-            if macro_data is not None:
-                # Alinear fechas
-                common_dates = technical_features.index.intersection(macro_data.index)
-                if len(common_dates) > 100:
-                    all_features = pd.concat([
-                        technical_features.loc[common_dates],
-                        macro_data.loc[common_dates]
-                    ], axis=1).dropna()
-                else:
+            if macro_data is not None and not macro_data.empty:
+                try:
+                    # Alinear fechas
+                    common_dates = technical_features.index.intersection(macro_data.index)
+                    if len(common_dates) > 100:
+                        all_features = pd.concat([
+                            technical_features.loc[common_dates],
+                            macro_data.loc[common_dates]
+                        ], axis=1).dropna()
+                        st.info("Características técnicas + macroeconómicas combinadas")
+                    else:
+                        all_features = technical_features.dropna()
+                        st.info("Solo características técnicas (fechas macro insuficientes)")
+                except Exception as e:
+                    st.warning(f"Error combinando datos macro: {str(e)[:100]}")
                     all_features = technical_features.dropna()
+                    st.info("Solo características técnicas (error en combinación)")
             else:
                 all_features = technical_features.dropna()
+                st.info("Solo características técnicas (sin datos macro)")
         
         # Crear targets
         returns = asset_prices.pct_change().dropna()
