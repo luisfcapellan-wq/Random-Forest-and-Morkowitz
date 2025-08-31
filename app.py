@@ -377,13 +377,33 @@ def main():
     col1, col2 = st.columns(2)
     with col1:
         st.write("**Precios Finales:**")
-        st.bar_chart(asset_prices.iloc[-1])
+        try:
+            final_prices = asset_prices.iloc[-1]
+            # Crear DataFrame con nombres limpios para evitar errores de Altair
+            chart_data = pd.DataFrame({
+                'Ticker': final_prices.index,
+                'Price': final_prices.values
+            }).set_index('Ticker')
+            st.bar_chart(chart_data)
+        except Exception as e:
+            # Fallback: mostrar como tabla
+            st.dataframe(asset_prices.iloc[-1:].T)
     
     with col2:
         returns = asset_prices.pct_change().dropna()
         annual_rets = returns.mean() * 252
         st.write("**Rendimientos Anualizados:**")
-        st.bar_chart(annual_rets)
+        try:
+            # Crear DataFrame con nombres limpios
+            returns_data = pd.DataFrame({
+                'Ticker': annual_rets.index,
+                'Annual_Return': annual_rets.values
+            }).set_index('Ticker')
+            st.bar_chart(returns_data)
+        except Exception as e:
+            # Fallback: mostrar como tabla
+            annual_rets_df = pd.DataFrame({'Retorno Anual': annual_rets})
+            st.dataframe(annual_rets_df)
     
     # 2. CARACTERÍSTICAS
     st.subheader("🔧 Características Técnicas")
@@ -505,12 +525,18 @@ def main():
         port_cum = (1 + portfolio_returns).cumprod()
         bench_cum = (1 + benchmark_returns).cumprod()
         
-        chart_data = pd.DataFrame({
-            'RF + Markowitz': port_cum.values,
-            'Benchmark': bench_cum.values
-        })
-        
-        st.line_chart(chart_data)
+        try:
+            chart_data = pd.DataFrame({
+                'RF_Markowitz': port_cum.values,
+                'Benchmark': bench_cum.values
+            }, index=range(len(port_cum)))
+            
+            st.line_chart(chart_data)
+        except Exception as e:
+            # Fallback: mostrar métricas numéricas
+            st.write("Performance acumulada:")
+            st.write(f"RF + Markowitz: {port_cum.iloc[-1]:.2f}")
+            st.write(f"Benchmark: {bench_cum.iloc[-1]:.2f}")
         
         # Métricas de valor añadido
         excess_return = port_metrics.get('Total Return', 0) - bench_metrics.get('Total Return', 0)
