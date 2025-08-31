@@ -459,7 +459,10 @@ def main():
         # Simulación de rebalanceo mensual
         portfolio_returns = []
         benchmark_returns = []
-        n_rebalances = max(1, len(test_returns) // 21)
+        portfolio_weights_history = []
+        rebalance_dates = []
+        
+        n_rebalances = max(3, len(test_returns) // 21)  # Mínimo 3 rebalanceos
         
         for rebal in range(n_rebalances):
             start_idx = rebal * 21
@@ -471,23 +474,95 @@ def main():
             # Usar datos hasta este punto para predicción
             hist_data = returns.iloc[:split_point + start_idx]
             
-            # Predicciones simples (media histórica + ruido)
-            expected_rets = hist_data.tail(63).mean() * 252
+            if len(hist_data) < 100:
+                continue
+            
+            # Predicciones usando modelos o media histórica
+            expected_rets = pd.Series(index=returns.columns)
+            for asset in returns.columns:
+                if asset in models and len(X) > split_point + start_idx:
+                    try:
+                        # Usar características más recientes para predicción
+                        recent_features = X.iloc[split_point + start_idx - 1:split_point + start_idx]
+                        if len(recent_features) > 0:
+                            pred = models[asset].predict(recent_features.values.reshape(1, -1))[0]
+                            expected_rets[asset] = pred * 252
+                        else:
+                            expected_rets[asset] = hist_data[asset].tail(63).mean() * 252
+                    except:
+                        expected_rets[asset] = hist_data[asset].tail(63).mean() * 252
+                else:
+                    expected_rets[asset] = hist_data[asset].tail(63).mean() * 252
             
             # Matriz de covarianzas
             cov_matrix = hist_data.tail(126).cov() * 252
             
             # Optimizar
             weights = markowitz_optimization_safe(expected_rets, cov_matrix, risk_aversion, max_weight)
+            weights_series = pd.Series(weights, index=returns.columns)
+            
+            # Guardar información del rebalanceo
+            portfolio_weights_history.append(weights_series.copy())
+            rebalance_dates.append(f"Rebalanceo {rebal + 1}")
             
             # Rendimientos del período
             period_rets = test_returns.iloc[start_idx:end_idx]
             if len(period_rets) > 0:
-                port_ret = (period_rets * weights).sum(axis=1).mean()
-                bench_ret = period_rets.mean().mean()
+                # Calcular rendimientos diarios del portafolio
+                daily_port_rets = (period_rets * weights_series).sum(axis=1)
+                daily_bench_rets = period_rets.mean(axis=1)
                 
-                portfolio_returns.append(port_ret)
-                benchmark_returns.append(bench_ret)
+                portfolio_returns.extend(daily_port_rets.tolist())
+                benchmark_returns.extend(daily_bench_rets.tolist())
+    
+    if not portfolio_returns:
+        st.error("No se pudieron calcular rendimientos del backtest")
+        return
+    
+    # Convertir a series con índices apropiados
+    portfolio_returns = pd.Series(portfolio_returns)
+    benchmark_returns = pd.Series(benchmark_returns)
+    
+    # Mostrar composición del portafolio
+    st.subheader("💼 Composición del Portafolio")
+    
+    if portfolio_weights_history:
+        # Pesos promedio durante el período
+        avg_weights = pd.DataFrame(portfolio_weights_history, index=rebalance_dates).mean()
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Pesos Promedio del Portafolio:**")
+            weights_df = pd.DataFrame({
+                'Activo': avg_weights.index,
+                'Peso (%)': (avg_weights * 100).round(1),
+                'Inversión en $1000': (avg_weights * 1000).round(0).astype(int)
+            })
+            st.dataframe(weights_df, hide_index=True)
+            
+        with col2:
+            st.write("**Evolución de Pesos:**")
+            try:
+                weights_chart_data = pd.DataFrame(portfolio_weights_history, 
+                                                index=rebalance_dates)
+                # Transponer para que cada activo sea una línea
+                st.line_chart(weights_chart_data.T)
+            except:
+                st.write("No se pudo mostrar el gráfico de evolución")
+        
+        # Recomendación práctica
+        st.write("**💡 Para invertir $1,000:**")
+        investment_breakdown = ""
+        for asset, weight in avg_weights.items():
+            amount = weight * 1000
+            if amount >= 10:  # Solo mostrar inversiones significativas
+                investment_breakdown += f"- **{asset}**: ${amount:.0f} ({weight*100:.1f}%)\n"
+        
+        if investment_breakdown:
+            st.markdown(investment_breakdown)
+        else:
+            st.write("Pesos muy pequeños para inversión de $1,000")
     
     if not portfolio_returns:
         st.error("No se pudieron calcular rendimientos del backtest")
@@ -521,22 +596,59 @@ def main():
         # Gráficos básicos
         st.subheader("📈 Performance")
         
-        # Performance acumulada
-        port_cum = (1 + portfolio_returns).cumprod()
-        bench_cum = (1 + benchmark_returns).cumprod()
+        # Verificar que tenemos datos válidos
+        if len(portfolio_returns) == 0 or len(benchmark_returns) == 0:
+            st.error("No hay datos suficientes para el gráfico")
+            return
         
+        # Performance acumulada con datos válidos
         try:
-            chart_data = pd.DataFrame({
-                'RF_Markowitz': port_cum.values,
-                'Benchmark': bench_cum.values
-            }, index=range(len(port_cum)))
+            # Asegurar que ambas series tengan la misma longitud
+            min_length = min(len(portfolio_returns), len(benchmark_returns))
+            port_returns_clean = portfolio_returns[:min_length]
+            bench_returns_clean = benchmark_returns[:min_length]
             
-            st.line_chart(chart_data)
+            # Calcular performance acumulada
+            port_cum = (1 + port_returns_clean).cumprod()
+            bench_cum = (1 + bench_returns_clean).cumprod()
+            
+            # Verificar que los valores no sean constantes
+            if port_cum.std() > 0.001 and bench_cum.std() > 0.001:
+                chart_data = pd.DataFrame({
+                    'RF_Markowitz': port_cum.values,
+                    'Benchmark': bench_cum.values
+                }, index=range(len(port_cum)))
+                
+                st.line_chart(chart_data)
+                
+                # Mostrar valores finales
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Valor Final RF+Markowitz", f"${port_cum.iloc[-1]:.3f}")
+                with col2:
+                    st.metric("Valor Final Benchmark", f"${bench_cum.iloc[-1]:.3f}")
+            else:
+                st.warning("Los datos de rendimiento parecen ser constantes")
+                st.write(f"RF+Markowitz rendimiento promedio: {port_returns_clean.mean():.4f}")
+                st.write(f"Benchmark rendimiento promedio: {bench_returns_clean.mean():.4f}")
+            
         except Exception as e:
-            # Fallback: mostrar métricas numéricas
-            st.write("Performance acumulada:")
-            st.write(f"RF + Markowitz: {port_cum.iloc[-1]:.2f}")
-            st.write(f"Benchmark: {bench_cum.iloc[-1]:.2f}")
+            # Fallback detallado
+            st.warning(f"Error creando gráfico: {str(e)}")
+            
+            # Mostrar estadísticas básicas en su lugar
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**RF + Markowitz:**")
+                st.write(f"Rendimientos: {len(portfolio_returns)} observaciones")
+                st.write(f"Promedio: {portfolio_returns.mean():.4f}")
+                st.write(f"Desv. Estándar: {portfolio_returns.std():.4f}")
+                
+            with col2:
+                st.write("**Benchmark:**")
+                st.write(f"Rendimientos: {len(benchmark_returns)} observaciones")
+                st.write(f"Promedio: {benchmark_returns.mean():.4f}")
+                st.write(f"Desv. Estándar: {benchmark_returns.std():.4f}")
         
         # Métricas de valor añadido
         excess_return = port_metrics.get('Total Return', 0) - bench_metrics.get('Total Return', 0)
