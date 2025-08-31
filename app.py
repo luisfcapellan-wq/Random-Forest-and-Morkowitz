@@ -117,6 +117,19 @@ def calculate_features(prices):
         
         # Moving average ratio
         features[f'{ticker}_ma'] = price_series / price_series.rolling(50).mean()
+        
+        # RSI aproximado
+        returns = price_series.pct_change()
+        gain = returns.where(returns > 0, 0).rolling(14).mean()
+        loss = -returns.where(returns < 0, 0).rolling(14).mean()
+        rs = gain / loss
+        features[f'{ticker}_rsi'] = 100 - (100 / (1 + rs))
+        
+        # Bollinger Bands
+        rolling_mean = price_series.rolling(20).mean()
+        rolling_std = price_series.rolling(20).std()
+        features[f'{ticker}_bb_upper'] = (price_series - (rolling_mean + 2 * rolling_std)) / rolling_std
+        features[f'{ticker}_bb_lower'] = ((rolling_mean - 2 * rolling_std) - price_series) / rolling_std
     
     return features.dropna()
 
@@ -140,8 +153,9 @@ def train_models(X, y):
             y_clean = y_train[asset][valid_mask]
             
             rf = RandomForestRegressor(
-                n_estimators=20,
-                max_depth=5,
+                n_estimators=50,  # Aumentado para mejor precisión
+                max_depth=8,      # Aumentado para capturar más complejidad
+                min_samples_split=5,
                 random_state=42
             )
             
@@ -153,8 +167,22 @@ def train_models(X, y):
     
     return models
 
+def predict_returns(models, current_features):
+    """Predice rendimientos usando los modelos Random Forest"""
+    predicted_returns = {}
+    
+    for asset, model in models.items():
+        try:
+            # Asegurar que las características estén en el orden correcto
+            prediction = model.predict(current_features.values.reshape(1, -1))[0]
+            predicted_returns[asset] = prediction
+        except Exception as e:
+            predicted_returns[asset] = 0  # Fallback a 0 si hay error
+    
+    return predicted_returns
+
 def optimize_portfolio(expected_returns, cov_matrix, risk_aversion=2):
-    """Optimización simple de Markowitz"""
+    """Optimización de Markowitz usando rendimientos esperados"""
     n_assets = len(expected_returns)
     
     def objective(weights):
@@ -235,7 +263,7 @@ def main():
         ticker_names = {t: t for t in tickers}
     
     end_date = st.sidebar.date_input("Fecha final:", datetime.now().date())
-    start_date = st.sidebar.date_input("Fecha inicial:", end_date - timedelta(days=365))
+    start_date = st.sidebar.date_input("Fecha inicial:", end_date - timedelta(days=730))  # 2 años para más datos
     
     prediction_horizon = st.sidebar.slider("Horizonte predicción (días):", 5, 42, 21)
     risk_aversion = st.sidebar.slider("Aversión al riesgo:", 0.5, 5.0, 2.0)
@@ -324,46 +352,68 @@ def main():
     
     st.success(f"Modelos entrenados: {len(models)}/{len(tickers)}")
     
-    # Backtesting
-    st.subheader("🔄 Backtesting")
+    # Mostrar importancia de características para un modelo de ejemplo
+    if len(models) > 0:
+        example_asset = list(models.keys())[0]
+        feature_importance = pd.DataFrame({
+            'Feature': X.columns,
+            'Importance': models[example_asset].feature_importances_
+        }).sort_values('Importance', ascending=False).head(10)
+        
+        st.write("**Importancia de Características (Ejemplo):**")
+        st.dataframe(feature_importance)
     
-    with st.spinner("Ejecutando backtesting..."):
+    # Backtesting
+    st.subheader("🔄 Backtesting con Random Forest")
+    
+    with st.spinner("Ejecutando backtesting con predicciones RF..."):
         
         # Configuración
-        split_idx = int(len(returns) * 0.8)
+        split_idx = int(len(returns) * 0.7)  # 70% para entrenamiento
         test_period = returns.iloc[split_idx:]
         
-        # Simulación simple de 3 rebalanceos
         portfolio_rets = []
         benchmark_rets = []
-        final_weights = None
-        
-        n_periods = 3
-        period_length = len(test_period) // n_periods
-        
         all_weights = []
+        rf_predictions_history = []
+        historical_predictions_history = []
+        
+        n_periods = min(6, len(test_period) // 30)  # Máximo 6 períodos
+        if n_periods == 0:
+            n_periods = 1
+        period_length = len(test_period) // n_periods
         
         for period in range(n_periods):
             start_p = period * period_length
             end_p = min((period + 1) * period_length, len(test_period))
             
-            if end_p <= start_p:
+            if end_p <= start_p + prediction_horizon:
                 break
             
-            # Datos históricos para predicción
-            hist_returns = returns.iloc[:split_idx + start_p]
+            # Obtener características más recientes para predicción
+            current_date = test_period.index[start_p]
+            current_features_row = features.loc[current_date]
             
-            # Rendimientos esperados (usando media histórica)
-            expected_returns = hist_returns.tail(63).mean() * 252
+            # PREDICCIÓN CON RANDOM FOREST
+            rf_predicted_returns = predict_returns(models, current_features_row)
+            rf_expected_returns = np.array([rf_predicted_returns.get(ticker, 0) for ticker in tickers])
             
-            # Matriz de covarianzas
-            cov_matrix = hist_returns.tail(126).cov() * 252
+            # Predicción histórica (para comparación)
+            hist_data = returns.iloc[:split_idx + start_p]
+            historical_expected_returns = hist_data.tail(63).mean().values * 252
             
-            # Optimizar
-            weights = optimize_portfolio(expected_returns, cov_matrix, risk_aversion)
+            # Matriz de covarianzas (usando datos históricos)
+            cov_matrix = hist_data.tail(126).cov().values * 252
+            
+            # Optimizar usando predicciones de Random Forest
+            weights = optimize_portfolio(rf_expected_returns, cov_matrix, risk_aversion)
             all_weights.append(weights)
             
-            # Rendimientos del período
+            # Guardar predicciones para análisis
+            rf_predictions_history.append(rf_expected_returns)
+            historical_predictions_history.append(historical_expected_returns)
+            
+            # Calcular rendimientos del período
             period_data = test_period.iloc[start_p:end_p]
             
             for _, day_returns in period_data.iterrows():
@@ -380,7 +430,31 @@ def main():
         st.error("No se generaron datos de backtesting")
         return
     
-    st.success(f"Backtesting completado: {len(portfolio_rets)} días analizados")
+    st.success(f"Backtesting completado: {len(portfolio_rets)} días analizados, {n_periods} rebalanceos")
+    
+    # Mostrar comparación de predicciones
+    if rf_predictions_history:
+        st.subheader("📈 Comparación de Predicciones")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Últimas Predicciones RF (% anualizado):**")
+            last_rf_pred = rf_predictions_history[-1] * 252 * 100
+            rf_pred_df = pd.DataFrame({
+                'Activo': tickers,
+                'Predicción RF': [f"{p:.2f}%" for p in last_rf_pred]
+            })
+            st.dataframe(rf_pred_df, hide_index=True)
+        
+        with col2:
+            st.write("**Últimas Predicciones Históricas (% anualizado):**")
+            last_hist_pred = historical_predictions_history[-1] * 100
+            hist_pred_df = pd.DataFrame({
+                'Activo': tickers,
+                'Predicción Histórica': [f"{p:.2f}%" for p in last_hist_pred]
+            })
+            st.dataframe(hist_pred_df, hide_index=True)
     
     # RESULTADOS
     st.subheader("📊 Resultados del Análisis")
@@ -501,19 +575,25 @@ def main():
     st.subheader("🎯 Conclusiones y Recomendaciones")
     
     excess_total = port_metrics.get('Total Return', 0) - bench_metrics.get('Total Return', 0)
+    sharpe_diff = port_metrics.get('Sharpe Ratio', 0) - bench_metrics.get('Sharpe Ratio', 0)
     
-    if excess_total > 0 and port_metrics.get('Sharpe Ratio', 0) > bench_metrics.get('Sharpe Ratio', 0):
+    if excess_total > 0 and sharpe_diff > 0:
         st.success("🏆 **ESTRATEGIA EXITOSA**: La combinación Random Forest + Markowitz superó al benchmark")
         
         st.markdown("""
         **Por qué funcionó:**
         - Predicciones más precisas usando Machine Learning
-        - Optimización matemática de riesgo-retorno
-        - Diversificación inteligente basada en correlaciones
+        - Optimización matemática de riesgo-retorno basada en señales predictivas
+        - Diversificación inteligente basada en correlaciones y predicciones
         """)
         
     elif excess_total > 0:
         st.warning("⚠️ **ÉXITO PARCIAL**: Mayor retorno pero sin mejora significativa en ratio de Sharpe")
+        st.markdown("""
+        **Posibles razones:**
+        - Las predicciones de RF capturaron retornos pero con mayor volatilidad
+        - Puede necesitar ajuste de parámetros de riesgo
+        """)
         
     else:
         st.info("📊 **ANÁLISIS COMPLETO**: En este período específico, el benchmark tuvo mejor performance")
@@ -523,6 +603,7 @@ def main():
         - Período de prueba limitado
         - Mercados eficientes donde es difícil predecir
         - Parámetros del modelo requieren ajuste
+        - Las predicciones de RF no fueron efectivas en este período
         """)
     
     # INSTRUCCIONES PRÁCTICAS
@@ -539,7 +620,7 @@ def main():
             st.markdown(f"   - **{ticker}** ({ticker_names[ticker]}): {weight*100:.1f}% de tu capital")
     
     st.markdown("""
-    2. **Rebalanceo**: Revisar y ajustar mensualmente
+    2. **Rebalanceo**: Revisar y ajustar mensualmente usando las últimas predicciones de RF
     3. **Monitoreo**: Seguir las métricas de Sharpe Ratio y drawdown
     4. **Ajustes**: Modificar aversión al riesgo según tu perfil
     """)
@@ -557,6 +638,7 @@ CONFIGURACIÓN:
 - Horizonte predicción: {prediction_horizon} días
 - Aversión al riesgo: {risk_aversion}
 - Tipo de datos: {data_type}
+- Modelo: Random Forest + Markowitz
 
 COMPOSICIÓN RECOMENDADA:
 """
@@ -573,6 +655,17 @@ PERFORMANCE:
 - Sharpe Ratio estrategia: {port_metrics.get('Sharpe Ratio', 0):.3f}
 - Sharpe Ratio benchmark: {bench_metrics.get('Sharpe Ratio', 0):.3f}
 - Alfa anualizada: {alpha_annual:.2%}
+- Tasa de éxito: {outperform_rate:.1%}
+
+PREDICCIONES RF ACTUALES (ANUALIZADAS):
+"""
+        
+        if rf_predictions_history:
+            last_pred = rf_predictions_history[-1] * 252 * 100
+            for ticker, pred in zip(tickers, last_pred):
+                report += f"- {ticker}: {pred:.2f}%\n"
+        
+        report += f"""
 
 INSTRUCCIONES DE INVERSIÓN:
 Para $1,000:
