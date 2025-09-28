@@ -194,6 +194,19 @@ def select_top_8_stocks(expected_returns, cov_matrix, models_quality, max_stocks
 # FUNCIONES AUXILIARES (MODIFICADAS PARA SOPORTAR SELECCIÓN DINÁMICA)
 # ====================================================================
 
+def clean_data_for_chart(data):
+    """Limpia los datos para que sean compatibles con gráficos de Streamlit"""
+    if isinstance(data, pd.Series):
+        # Convertir a numérico y eliminar NaN/Inf
+        cleaned = pd.to_numeric(data, errors='coerce')
+        cleaned = cleaned.replace([np.inf, -np.inf], np.nan).dropna()
+        return cleaned
+    elif isinstance(data, pd.DataFrame):
+        cleaned = data.apply(pd.to_numeric, errors='coerce')
+        cleaned = cleaned.replace([np.inf, -np.inf], np.nan).dropna()
+        return cleaned
+    return data
+
 @st.cache_data
 def download_macro_data(start_date, end_date):
     """Descarga datos macroeconómicos con fallback"""
@@ -428,6 +441,16 @@ def markowitz_optimization(expected_returns, cov_matrix, risk_aversion=2, max_we
 
 def calculate_portfolio_metrics(returns):
     """Calcula métricas de performance del portafolio"""
+    if len(returns) == 0:
+        return {
+            'Total Return': 0,
+            'Annual Return': 0,
+            'Annual Volatility': 0,
+            'Sharpe Ratio': 0,
+            'Max Drawdown': 0,
+            'Win Rate': 0
+        }
+    
     total_return = (1 + returns).prod() - 1
     annual_return = (1 + returns.mean())**252 - 1
     annual_volatility = returns.std() * np.sqrt(252)
@@ -451,35 +474,8 @@ def calculate_portfolio_metrics(returns):
 def create_performance_plots(portfolio_returns, benchmark_returns, weights_history):
     """Crea gráficos de performance"""
     
-    if not PLOTLY_AVAILABLE:
-        st.error("Plotly no disponible - usando visualizaciones alternativas")
-        
-        # Visualizaciones alternativas con matplotlib/streamlit nativo
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Performance acumulada usando line_chart nativo de streamlit
-            portfolio_cum = (1 + portfolio_returns).cumprod()
-            benchmark_cum = (1 + benchmark_returns).cumprod()
-            
-            performance_df = pd.DataFrame({
-                'RF + Markowitz': portfolio_cum.values,
-                'Benchmark': benchmark_cum.values
-            })
-            
-            st.line_chart(performance_df)
-            st.caption("Rendimiento Acumulado")
-        
-        with col2:
-            # Distribución usando histograma nativo
-            hist_df = pd.DataFrame({
-                'Portfolio': portfolio_returns.values,
-                'Benchmark': benchmark_returns.values
-            })
-            
-            st.bar_chart(pd.Series(portfolio_returns.values).value_counts().sort_index().head(20))
-            st.caption("Distribución de Rendimientos")
-        
+    if not PLOTLY_AVAILABLE or len(portfolio_returns) == 0:
+        st.error("Plotly no disponible o datos insuficientes")
         return None, None, None, None
     
     # 1. Performance acumulada
@@ -556,15 +552,16 @@ def create_performance_plots(portfolio_returns, benchmark_returns, weights_histo
     # 4. Evolución de pesos
     fig4 = go.Figure()
     
-    if len(weights_history) > 0:
+    if len(weights_history) > 0 and not weights_history.empty:
         for i, ticker in enumerate(weights_history.columns):
-            fig4.add_trace(go.Scatter(
-                x=weights_history.index,
-                y=weights_history[ticker].values,
-                mode='lines',
-                name=ticker,
-                stackgroup='one'
-            ))
+            if ticker in weights_history and weights_history[ticker].sum() > 0:
+                fig4.add_trace(go.Scatter(
+                    x=weights_history.index,
+                    y=weights_history[ticker].values,
+                    mode='lines',
+                    name=ticker,
+                    stackgroup='one'
+                ))
     
     fig4.update_layout(
         title='Evolución de Pesos del Portafolio',
@@ -758,12 +755,16 @@ def main():
             st.info(f"Descargando datos de {len(tickers)} activos...")
             asset_prices = download_market_data_robust(tickers, start_date, end_date)
             
-            if asset_prices is None:
+            if asset_prices is None or asset_prices.empty:
                 st.error("Error descargando datos de activos")
                 return
             
             # Filtrar activos con datos insuficientes
             valid_assets = asset_prices.columns[asset_prices.notna().sum() > 100]
+            if len(valid_assets) < 3:
+                st.error("Menos de 3 activos con datos suficientes para análisis")
+                return
+                
             asset_prices = asset_prices[valid_assets]
             
             st.success(f"✅ {len(asset_prices)} días de datos para {asset_prices.shape[1]} activos válidos")
@@ -786,13 +787,23 @@ def main():
             with col1:
                 st.write("**Precios finales:**")
                 final_prices = asset_prices.iloc[-1].sort_values(ascending=False)
-                st.bar_chart(final_prices.head(15))  # Mostrar solo top 15
+                # Usar datos limpios para el gráfico
+                final_prices_clean = clean_data_for_chart(final_prices.head(15))
+                if not final_prices_clean.empty:
+                    st.bar_chart(final_prices_clean)
+                else:
+                    st.warning("No hay datos válidos para mostrar")
             
             with col2:
                 st.write("**Rendimientos anualizados (%):**")
                 returns = asset_prices.pct_change().dropna()
                 annual_returns = (returns.mean() * 252 * 100).sort_values(ascending=False)
-                st.bar_chart(annual_returns.head(15))
+                # Usar datos limpios para el gráfico
+                annual_returns_clean = clean_data_for_chart(annual_returns.head(15))
+                if not annual_returns_clean.empty:
+                    st.bar_chart(annual_returns_clean)
+                else:
+                    st.warning("No hay datos válidos para mostrar")
         
         # 2. FEATURE ENGINEERING
         st.subheader("🔧 Creación de Características")
@@ -822,6 +833,10 @@ def main():
         
         # Alinear fechas
         common_dates = all_features.index.intersection(targets.index)
+        if len(common_dates) < 100:
+            st.error("Datos insuficientes después de alinear fechas")
+            return
+            
         X = all_features.loc[common_dates]
         y = targets.loc[common_dates]
         
@@ -844,15 +859,15 @@ def main():
             
             # Mostrar performance
             perf_df = pd.DataFrame(performance).T
-            if not perf_df.empty:
+            if not perf_df.empty and 'R2_train' in perf_df.columns:
                 st.write("**Performance de los modelos (top 10 por R²):**")
-                top_models = perf_df.nlargest(10, 'R2_train') if 'R2_train' in perf_df.columns else perf_df.head(10)
+                top_models = perf_df.nlargest(10, 'R2_train')
                 st.dataframe(top_models.round(4))
         else:
             st.error("❌ No se pudieron entrenar modelos")
             return
         
-        # NUEVA SECCIÓN: SELECCIÓN DE LAS 8 MEJORES ACCIONES
+        # NUEVA SECCIÓN: SELECCIÓN DE LAS MEJORES ACCIONES
         if asset_universe == "50 Acciones (30 EE.UU. + 20 México)" and len(models) >= portfolio_size:
             st.subheader("🎯 Selección de las Mejores Acciones")
             
@@ -872,7 +887,7 @@ def main():
                         expected_returns[asset] = returns[asset].mean() * 252
                 
                 # Calcular matriz de covarianza
-                recent_returns = returns.tail(252)  # Último año
+                recent_returns = returns.tail(min(252, len(returns)))  # Último año
                 cov_matrix = recent_returns.cov() * 252
                 
                 # Seleccionar top N acciones
@@ -892,7 +907,7 @@ def main():
                         'Nombre': stock_names.get(ticker, ticker),
                         'País': 'México' if '.MX' in ticker else 'EE.UU.',
                         'Score Selección': f"{selection_scores[i]:.3f}",
-                        'Retorno Esperado Anual': f"{expected_returns[ticker]:.1%}",
+                        'Retorno Esperado Anual': f"{expected_returns[ticker]:.1%}" if ticker in expected_returns else "N/A",
                         'R² Modelo': f"{performance.get(ticker, {}).get('R2_train', 'N/A')}"
                     })
                 
@@ -913,7 +928,15 @@ def main():
             
             # Configurar backtesting
             backtest_start_idx = max(252, len(X) // 3)  # Empezar con suficientes datos
+            if backtest_start_idx >= len(X):
+                st.error("Datos insuficientes para backtesting")
+                return
+                
             backtest_dates = X.index[backtest_start_idx::rebalance_freq]
+            
+            if len(backtest_dates) < 2:
+                st.error("Período de backtesting demasiado corto")
+                return
             
             portfolio_returns = []
             benchmark_returns = []
@@ -937,11 +960,10 @@ def main():
                         continue
                     
                     # SELECCIÓN DINÁMICA DE ACCIONES (solo para universo de 50)
-                    current_tickers = tickers
-                    if asset_universe == "50 Acciones (30 EE.UU. + 20 México)":
+                    current_tickers = list(asset_prices.columns)
+                    if asset_universe == "50 Acciones (30 EE.UU. + 20 México)" and len(models) >= portfolio_size:
                         # Re-entrenar modelos con datos históricos
-                        with st.spinner(f"Re-entrenando modelos para selección en {rebalance_date.date()}"):
-                            hist_models, hist_performance = train_random_forest_models(X_hist, y_hist)
+                        hist_models, hist_performance = train_random_forest_models(X_hist, y_hist)
                         
                         if hist_models and len(hist_models) >= portfolio_size:
                             # Calcular retornos esperados históricos
@@ -959,15 +981,16 @@ def main():
                                     expected_returns_hist[asset] = returns[asset].mean() * 252
                             
                             # Calcular covarianza histórica
-                            returns_hist = returns.loc[returns.index <= rebalance_date].tail(252)
-                            cov_matrix_hist = returns_hist.cov() * 252
-                            
-                            # Seleccionar mejores acciones históricamente
-                            selected_hist, _ = select_top_8_stocks(
-                                expected_returns_hist, cov_matrix_hist, hist_performance, portfolio_size
-                            )
-                            current_tickers = selected_hist
-                            selection_history.append((rebalance_date, selected_hist))
+                            returns_hist = returns.loc[returns.index <= rebalance_date].tail(min(252, len(returns)))
+                            if not returns_hist.empty:
+                                cov_matrix_hist = returns_hist.cov() * 252
+                                
+                                # Seleccionar mejores acciones históricamente
+                                selected_hist, _ = select_top_8_stocks(
+                                    expected_returns_hist, cov_matrix_hist, hist_performance, portfolio_size
+                                )
+                                current_tickers = selected_hist
+                                selection_history.append((rebalance_date, selected_hist))
                     
                     # Predecir rendimientos esperados para las acciones seleccionadas
                     current_features = X.loc[rebalance_date:rebalance_date]
@@ -985,31 +1008,32 @@ def main():
                     
                     # Calcular matriz de covarianzas para las seleccionadas
                     recent_returns_current = returns[current_tickers].loc[returns.index <= rebalance_date].tail(min(252, len(returns)))
-                    cov_matrix_current = recent_returns_current.cov() * 252
-                    
-                    # Optimizar portafolio
-                    weights = markowitz_optimization(
-                        expected_returns_current, cov_matrix_current, risk_aversion, max_weight
-                    )
-                    weights_series = pd.Series(weights, index=current_tickers)
-                    
-                    weights_history.append(weights_series)
-                    rebalance_dates.append(rebalance_date)
-                    
-                    # Calcular rendimientos del período siguiente
-                    next_date_idx = min(hist_idx + rebalance_freq, len(X) - 1)
-                    period_returns = returns.iloc[hist_idx+1:next_date_idx+1]
-                    
-                    if len(period_returns) > 0:
-                        # Asegurar que tenemos todas las columnas necesarias
-                        available_columns = [col for col in current_tickers if col in period_returns.columns]
-                        if available_columns:
-                            portfolio_period_returns = (period_returns[available_columns] * 
-                                                      weights_series[available_columns]).sum(axis=1)
-                            benchmark_period_returns = period_returns[available_columns].mean(axis=1)
-                            
-                            portfolio_returns.extend(portfolio_period_returns.tolist())
-                            benchmark_returns.extend(benchmark_period_returns.tolist())
+                    if not recent_returns_current.empty:
+                        cov_matrix_current = recent_returns_current.cov() * 252
+                        
+                        # Optimizar portafolio
+                        weights = markowitz_optimization(
+                            expected_returns_current.values, cov_matrix_current.values, risk_aversion, max_weight
+                        )
+                        weights_series = pd.Series(weights, index=current_tickers)
+                        
+                        weights_history.append(weights_series)
+                        rebalance_dates.append(rebalance_date)
+                        
+                        # Calcular rendimientos del período siguiente
+                        next_date_idx = min(hist_idx + rebalance_freq, len(X) - 1)
+                        period_returns = returns.iloc[hist_idx+1:next_date_idx+1]
+                        
+                        if len(period_returns) > 0:
+                            # Asegurar que tenemos todas las columnas necesarias
+                            available_columns = [col for col in current_tickers if col in period_returns.columns]
+                            if available_columns:
+                                portfolio_period_returns = (period_returns[available_columns] * 
+                                                          weights_series[available_columns]).sum(axis=1)
+                                benchmark_period_returns = period_returns[available_columns].mean(axis=1)
+                                
+                                portfolio_returns.extend(portfolio_period_returns.tolist())
+                                benchmark_returns.extend(benchmark_period_returns.tolist())
                     
                 except Exception as e:
                     st.warning(f"Error en rebalanceo {i+1}: {str(e)[:100]}")
@@ -1021,18 +1045,16 @@ def main():
             progress_bar.empty()
         
         # Convertir a Series
-        if portfolio_returns:
+        if portfolio_returns and benchmark_returns:
             portfolio_returns = pd.Series(portfolio_returns)
             benchmark_returns = pd.Series(benchmark_returns)
             
-            # Crear DataFrame de pesos (puede tener diferentes columnas en cada fecha)
-            weights_df = pd.DataFrame()
-            for i, weights_series in enumerate(weights_history):
-                temp_df = pd.DataFrame(weights_series).T
-                temp_df.index = [rebalance_dates[i]]
-                weights_df = pd.concat([weights_df, temp_df])
-            
-            weights_df = weights_df.fillna(0)
+            # Crear DataFrame de pesos
+            if weights_history:
+                weights_df = pd.DataFrame(weights_history, index=rebalance_dates)
+                weights_df = weights_df.fillna(0)
+            else:
+                weights_df = pd.DataFrame()
         else:
             st.error("❌ No se pudieron calcular rendimientos del backtest")
             return
@@ -1091,29 +1113,31 @@ def main():
                 for ticker in selected:
                     selection_counts[ticker] = selection_counts.get(ticker, 0) + 1
             
-            selection_freq = pd.Series(selection_counts).sort_values(ascending=False)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("#### 📊 Frecuencia de Selección")
-                freq_df = pd.DataFrame({
-                    'Ticker': selection_freq.index,
-                    'Veces Seleccionada': selection_freq.values,
-                    'Frecuencia (%)': (selection_freq.values / len(selection_history) * 100).round(1),
-                    'País': ['México' if '.MX' in t else 'EE.UU.' for t in selection_freq.index]
-                })
-                st.dataframe(freq_df.head(15), hide_index=True)
-            
-            with col2:
-                st.markdown("#### 🌎 Distribución por País")
-                country_dist = freq_df.groupby('País')['Veces Seleccionada'].sum()
-                fig_country = px.pie(
-                    values=country_dist.values,
-                    names=country_dist.index,
-                    title='Selecciones por País'
-                )
-                st.plotly_chart(fig_country, use_container_width=True)
+            if selection_counts:
+                selection_freq = pd.Series(selection_counts).sort_values(ascending=False)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### 📊 Frecuencia de Selección")
+                    freq_df = pd.DataFrame({
+                        'Ticker': selection_freq.index,
+                        'Veces Seleccionada': selection_freq.values,
+                        'Frecuencia (%)': (selection_freq.values / len(selection_history) * 100).round(1),
+                        'País': ['México' if '.MX' in t else 'EE.UU.' for t in selection_freq.index]
+                    })
+                    st.dataframe(freq_df.head(15), hide_index=True)
+                
+                with col2:
+                    st.markdown("#### 🌎 Distribución por País")
+                    country_dist = freq_df.groupby('País')['Veces Seleccionada'].sum()
+                    if not country_dist.empty:
+                        fig_country = px.pie(
+                            values=country_dist.values,
+                            names=country_dist.index,
+                            title='Selecciones por País'
+                        )
+                        st.plotly_chart(fig_country, use_container_width=True)
         
         # Gráficos principales
         st.subheader("📈 Visualizaciones de Performance")
@@ -1126,16 +1150,151 @@ def main():
             
             with col1:
                 st.plotly_chart(fig1, use_container_width=True)
-                st.plotly_chart(fig3, use_container_width=True)
+                if fig3 is not None:
+                    st.plotly_chart(fig3, use_container_width=True)
             
             with col2:
-                st.plotly_chart(fig2, use_container_width=True)
-                st.plotly_chart(fig4, use_container_width=True)
-        else:
-            st.info("Visualizaciones básicas mostradas arriba (Plotly no disponible)")
+                if fig2 is not None:
+                    st.plotly_chart(fig2, use_container_width=True)
+                if fig4 is not None:
+                    st.plotly_chart(fig4, use_container_width=True)
         
-        # Resto del código permanece igual...
-        # [El resto del código de exportación, conclusiones, etc. se mantiene igual]
+        # Exportación de resultados
+        st.subheader("💾 Exportar Resultados")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # CSV de rendimientos
+            results_df = pd.DataFrame({
+                'Portfolio_Returns': portfolio_returns.values,
+                'Benchmark_Returns': benchmark_returns.values,
+                'Excess_Returns': excess_returns.values
+            })
+            
+            csv_returns = results_df.to_csv(index=False)
+            st.download_button(
+                label="📊 Descargar Rendimientos",
+                data=csv_returns,
+                file_name=f"portfolio_returns_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        
+        with col2:
+            # CSV de pesos
+            if not weights_df.empty:
+                csv_weights = weights_df.to_csv()
+                st.download_button(
+                    label="⚖️ Descargar Pesos",
+                    data=csv_weights,
+                    file_name=f"portfolio_weights_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
+        
+        with col3:
+            # Reporte de métricas
+            metrics_report = f"""
+REPORTE DE PERFORMANCE - {datetime.now().strftime('%Y-%m-%d %H:%M')}
+{'='*60}
+
+CONFIGURACIÓN:
+- Universo: {asset_universe}
+- Período: {start_date} a {end_date}
+- Horizonte predicción: {prediction_horizon} días
+- Aversión al riesgo: {risk_aversion}
+- Peso máximo: {max_weight*100:.0f}%
+- Rebalanceo: cada {rebalance_freq} días
+
+RESULTADOS PORTAFOLIO RF + MARKOWITZ:
+- Retorno Total: {portfolio_metrics['Total Return']:.2%}
+- Retorno Anualizado: {portfolio_metrics['Annual Return']:.2%}
+- Volatilidad Anualizada: {portfolio_metrics['Annual Volatility']:.2%}
+- Ratio de Sharpe: {portfolio_metrics['Sharpe Ratio']:.3f}
+- Máximo Drawdown: {portfolio_metrics['Max Drawdown']:.2%}
+- Win Rate: {portfolio_metrics['Win Rate']:.1%}
+
+RESULTADOS BENCHMARK:
+- Retorno Total: {benchmark_metrics['Total Return']:.2%}
+- Retorno Anualizado: {benchmark_metrics['Annual Return']:.2%}
+- Volatilidad Anualizada: {benchmark_metrics['Annual Volatility']:.2%}
+- Ratio de Sharpe: {benchmark_metrics['Sharpe Ratio']:.3f}
+- Máximo Drawdown: {benchmark_metrics['Max Drawdown']:.2%}
+- Win Rate: {benchmark_metrics['Win Rate']:.1%}
+
+VALOR AÑADIDO:
+- Alfa Anualizada: {alpha:.2%}
+- Information Ratio: {information_ratio:.3f}
+- % Días que superó benchmark: {outperform_rate:.1%}
+
+"""
+            st.download_button(
+                label="📋 Descargar Reporte",
+                data=metrics_report,
+                file_name=f"portfolio_report_{datetime.now().strftime('%Y%m%d')}.txt",
+                mime="text/plain"
+            )
+        
+        # Conclusiones
+        st.subheader("🎯 Conclusiones del Análisis")
+        
+        excess_return_pct = (portfolio_metrics['Total Return'] - benchmark_metrics['Total Return'])
+        sharpe_improvement = portfolio_metrics['Sharpe Ratio'] - benchmark_metrics['Sharpe Ratio']
+        
+        if excess_return_pct > 0 and sharpe_improvement > 0:
+            conclusion_type = "success"
+            conclusion_text = "🏆 **ESTRATEGIA EXITOSA**"
+            details = f"""
+            La estrategia Random Forest + Markowitz superó al benchmark tanto en retorno 
+            (+{excess_return_pct:.2%}) como en ratio de Sharpe (+{sharpe_improvement:.3f} puntos).
+            
+            **Fortalezas identificadas:**
+            - Mejor gestión del riesgo (menor drawdown)
+            - Mayor consistencia en la generación de alfa
+            - Diversificación inteligente y adaptativa
+            """
+        elif excess_return_pct > 0:
+            conclusion_type = "warning"
+            conclusion_text = "⚠️ **ESTRATEGIA PARCIALMENTE EXITOSA**"
+            details = f"""
+            La estrategia generó mayor retorno (+{excess_return_pct:.2%}) pero con 
+            ratio de Sharpe similar al benchmark.
+            
+            **Áreas de mejora:**
+            - Optimizar la gestión de riesgo
+            - Ajustar parámetros de aversión al riesgo
+            - Considerar costos de transacción
+            """
+        else:
+            conclusion_type = "error"
+            conclusion_text = "❌ **ESTRATEGIA NO EXITOSA**"
+            details = f"""
+            La estrategia no logró superar al benchmark en el período analizado.
+            
+            **Posibles causas:**
+            - Sobreajuste en los modelos de ML
+            - Período de prueba desfavorable
+            - Parámetros sub-óptimos
+            - Costos de transacción no considerados
+            """
+        
+        if conclusion_type == "success":
+            st.success(conclusion_text)
+        elif conclusion_type == "warning":
+            st.warning(conclusion_text)
+        else:
+            st.error(conclusion_text)
+        
+        st.markdown(details)
+        
+        # Footer con información técnica
+        st.markdown("---")
+        st.markdown(f"""
+        <div style='text-align: center; color: #666; font-size: 12px;'>
+            Análisis completado en {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 
+            {len(portfolio_returns)} observaciones de backtest | 
+            {len(models)} modelos Random Forest entrenados
+        </div>
+        """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
