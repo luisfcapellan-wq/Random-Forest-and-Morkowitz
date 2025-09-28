@@ -1,1175 +1,750 @@
-#!/usr/bin/env python3
-"""
-📊 APLICACIÓN STREAMLIT: RANDOM FOREST + MARKOWITZ PORTFOLIO OPTIMIZER
-🎓 Práctica Académica Interactiva para Construcción de Portafolios
-
-Autor: Dr. Luis Capellán- Práctica Académica
-Fecha: 2025
-
-Para ejecutar: streamlit run app.py
-"""
-
-# Importaciones con manejo de errores
 import streamlit as st
 import pandas as pd
 import numpy as np
 import warnings
-import time
 from datetime import datetime, timedelta
-import io
 
-# Importaciones con manejo de errores para dependencias opcionales
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    st.error("❌ Plotly no está instalado. Ejecute: pip install plotly")
-    PLOTLY_AVAILABLE = False
-    st.stop()
-
+# Importaciones con verificación
 try:
     import yfinance as yf
-    YF_AVAILABLE = True
 except ImportError:
-    st.error("❌ yfinance no está instalado. Ejecute: pip install yfinance")
-    YF_AVAILABLE = False
+    st.error("yfinance no está instalado")
     st.stop()
 
 try:
     from sklearn.ensemble import RandomForestRegressor
-    from sklearn.metrics import mean_squared_error, mean_absolute_error
-    SKLEARN_AVAILABLE = True
+    from sklearn.metrics import mean_squared_error
 except ImportError:
-    st.error("❌ scikit-learn no está instalado. Ejecute: pip install scikit-learn")
-    SKLEARN_AVAILABLE = False
+    st.error("scikit-learn no está instalado") 
     st.stop()
 
 try:
     from scipy.optimize import minimize
-    SCIPY_AVAILABLE = True
 except ImportError:
-    st.error("❌ scipy no está instalado. Ejecute: pip install scipy")
-    SCIPY_AVAILABLE = False
+    st.error("scipy no está instalado")
     st.stop()
 
 warnings.filterwarnings('ignore')
 
-# ====================================================================
-# CONFIGURACIÓN DE LA PÁGINA
-# ====================================================================
-
 st.set_page_config(
-    page_title="Random Forest + Markowitz Portfolio Optimizer",
+    page_title="Random Forest + Markowitz Portfolio",
     page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# CSS personalizado
+# CSS
 st.markdown("""
 <style>
-    .main-header {
-        background: linear-gradient(90deg, #1f4e79, #2e8b57);
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 20px;
-    }
-    .metric-container {
-        background: #f0f2f6;
-        padding: 15px;
-        border-radius: 10px;
-        margin: 10px 0;
-        border-left: 4px solid #1f4e79;
-    }
-    .success-box {
-        background: #d4edda;
-        color: #155724;
-        padding: 10px;
-        border-radius: 5px;
-        border: 1px solid #c3e6cb;
-        margin: 10px 0;
-    }
-    .warning-box {
-        background: #fff3cd;
-        color: #856404;
-        padding: 10px;
-        border-radius: 5px;
-        border: 1px solid #ffeaa7;
-        margin: 10px 0;
-    }
+.main-header {
+    background: linear-gradient(90deg, #1f4e79, #2e8b57);
+    padding: 20px;
+    border-radius: 10px;
+    color: white;
+    text-align: center;
+    margin-bottom: 20px;
+}
+.feature-card {
+    background: #f0f8ff;
+    padding: 15px;
+    border-radius: 10px;
+    margin: 10px 0;
+    border-left: 4px solid #1f4e79;
+}
+.analogy-box {
+    background: #fff0f5;
+    padding: 15px;
+    border-radius: 10px;
+    margin: 10px 0;
+    border-left: 4px solid #8b008b;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# ====================================================================
-# FUNCIONES AUXILIARES
-# ====================================================================
+# FUNCIONES
 
-@st.cache_data
-def download_macro_data(start_date, end_date):
-    """Descarga datos macroeconómicos con fallback"""
-    macro_tickers = {
-        '^TNX': 'Treasury_10Y',
-        '^VIX': 'VIX',
-        'DX-Y.NYB': 'DXY',
-        '^GSPC': 'SP500'
-    }
+def create_sample_data(tickers, start_date, end_date):
+    """Crea datos simulados realistas"""
+    np.random.seed(42)
     
-    macro_data = {}
-    for ticker, name in macro_tickers.items():
-        try:
-            # Usar el método robusto del Ticker
-            temp = yf.Ticker(ticker).history(
-                start=start_date,
-                end=end_date,
-                auto_adjust=True
-            )
-            if not temp.empty and len(temp) > 50:
-                macro_data[name] = temp['Close']
-        except Exception as e:
-            st.warning(f"No se pudo descargar {name}: {str(e)[:50]}")
-            continue
-    
-    return pd.DataFrame(macro_data) if macro_data else None
-
-def create_fallback_data(tickers, start_date, end_date):
-    """Crea datos simulados si la descarga falla"""
-    st.warning("Usando datos simulados para demostración")
-    
-    # Calcular número de días
     n_days = (end_date - start_date).days
+    dates = pd.date_range(start=start_date, periods=min(n_days, 500), freq='D')
     
-    # Generar fechas
-    dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    dates = dates[dates.weekday < 5]  # Solo días laborables
-    
-    # Parámetros realistas para ETFs
-    annual_returns = [0.08, 0.12, 0.10, 0.09, 0.06, 0.10, 0.08, 0.07, 0.06]
-    annual_vols = [0.20, 0.25, 0.18, 0.20, 0.30, 0.22, 0.16, 0.24, 0.14]
+    annual_returns = [0.08, 0.12, 0.10, 0.09, 0.06]
+    annual_vols = [0.20, 0.25, 0.18, 0.20, 0.30]
     
     data = {}
     
-    for i, ticker in enumerate(tickers[:len(annual_returns)]):
-        # Generar precio inicial aleatorio
-        initial_price = 50 + np.random.random() * 100
+    for i, ticker in enumerate(tickers[:5]):
+        initial_price = 100
         prices = [initial_price]
         
         daily_return = annual_returns[i] / 252
         daily_vol = annual_vols[i] / np.sqrt(252)
         
         for day in range(1, len(dates)):
-            # Simulación realista con factor de mercado
-            market_factor = np.random.normal(0, 0.01)
-            idiosyncratic = np.random.normal(0, daily_vol)
-            
-            price_change = daily_return + idiosyncratic + 0.5 * market_factor
+            price_change = daily_return + daily_vol * np.random.normal()
             new_price = prices[-1] * (1 + price_change)
-            prices.append(new_price)
+            prices.append(max(new_price, 10))
         
-        data[ticker] = pd.Series(prices, index=dates[:len(prices)])
+        data[ticker] = prices[:len(dates)]
     
-    return pd.DataFrame(data)
+    return pd.DataFrame(data, index=dates)
 
-# Función de descarga mejorada que incluye fallback
 @st.cache_data(ttl=3600)
-def download_market_data_robust(tickers, start_date, end_date):
-    """Descarga datos con múltiples métodos de fallback"""
+def get_market_data(tickers, start_date, end_date):
+    """Obtiene datos con fallback a simulación"""
     
-    # Método 1: Usando yf.download
     try:
-        st.info("Intentando método 1: yf.download...")
         data = {}
-        
-        for ticker in tickers:
-            try:
-                temp = yf.download(ticker, start=start_date, end=end_date, progress=False)
-                if not temp.empty:
-                    if 'Adj Close' in temp.columns:
-                        data[ticker] = temp['Adj Close']
-                    elif 'Close' in temp.columns:
-                        data[ticker] = temp['Close']
-                    
-            except:
-                continue
-        
-        if len(data) >= 3:
-            df = pd.DataFrame(data).dropna()
-            if len(df) > 100:
-                st.success(f"Método 1 exitoso: {len(data)} activos descargados")
-                return df
-    except:
-        pass
-    
-    # Método 2: Usando yf.Ticker individualmente
-    try:
-        st.info("Intentando método 2: yf.Ticker individual...")
-        data = {}
-        
-        for ticker in tickers:
+        for ticker in tickers[:5]:
             try:
                 stock = yf.Ticker(ticker)
-                temp = stock.history(start=start_date, end=end_date)
-                if not temp.empty and len(temp) > 10:
-                    data[ticker] = temp['Close']
+                hist = stock.history(start=start_date, end=end_date)
+                if len(hist) > 100:
+                    data[ticker] = hist['Close']
             except:
                 continue
         
         if len(data) >= 3:
             df = pd.DataFrame(data).dropna()
             if len(df) > 100:
-                st.success(f"Método 2 exitoso: {len(data)} activos descargados")
-                return df
+                return df, "real"
     except:
         pass
     
-    # Método 3: Tickers alternativos
-    try:
-        st.info("Intentando método 3: Tickers alternativos...")
-        alternative_tickers = ['SPY', 'QQQ', 'IWM', 'VTI', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
-        data = {}
-        
-        for ticker in alternative_tickers:
-            try:
-                temp = yf.Ticker(ticker).history(start=start_date, end=end_date)
-                if not temp.empty and len(temp) > 10:
-                    data[ticker] = temp['Close']
-                    if len(data) >= 6:  # Suficientes para análisis
-                        break
-            except:
-                continue
-        
-        if len(data) >= 3:
-            df = pd.DataFrame(data).dropna()
-            if len(df) > 100:
-                st.success(f"Método 3 exitoso: {len(data)} activos alternativos")
-                return df
-    except:
-        pass
-    
-    # Método 4: Datos simulados
-    st.warning("Todos los métodos de descarga fallaron. Usando datos simulados para demostración.")
-    return create_fallback_data(tickers, start_date, end_date)
+    return create_sample_data(tickers, start_date, end_date), "simulado"
 
-@st.cache_data
-def download_macro_data(start_date, end_date):
-    """Descarga datos macroeconómicos"""
-    macro_tickers = {
-        '^TNX': 'Treasury_10Y',
-        '^VIX': 'VIX',
-        'DX-Y.NYB': 'DXY',
-        '^GSPC': 'SP500'
-    }
-    
-    macro_data = {}
-    for ticker, name in macro_tickers.items():
-        try:
-            temp = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if not temp.empty:
-                macro_data[name] = temp['Adj Close'] if 'Adj Close' in temp.columns else temp['Close']
-        except:
-            continue
-    
-    return pd.DataFrame(macro_data) if macro_data else None
-
-def calculate_technical_indicators(prices):
-    """Calcula indicadores técnicos"""
+def calculate_features(prices):
+    """Calcula características técnicas básicas"""
     features = pd.DataFrame(index=prices.index)
     
     for ticker in prices.columns:
         price_series = prices[ticker]
         
         # Momentum
-        features[f'{ticker}_momentum_1m'] = price_series.pct_change(21)
-        features[f'{ticker}_momentum_3m'] = price_series.pct_change(63)
+        features[f'{ticker}_mom'] = price_series.pct_change(20)
         
         # Volatilidad
-        features[f'{ticker}_volatility'] = price_series.pct_change().rolling(20).std()
+        features[f'{ticker}_vol'] = price_series.pct_change().rolling(20).std()
         
-        # Moving Average Ratios
-        features[f'{ticker}_ma_ratio_50'] = price_series / price_series.rolling(50).mean()
-        features[f'{ticker}_ma_ratio_200'] = price_series / price_series.rolling(200).mean()
+        # Moving average ratio
+        features[f'{ticker}_ma'] = price_series / price_series.rolling(50).mean()
         
-        # RSI simplificado
-        delta = price_series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        # RSI aproximado
+        returns = price_series.pct_change()
+        gain = returns.where(returns > 0, 0).rolling(14).mean()
+        loss = -returns.where(returns < 0, 0).rolling(14).mean()
         rs = gain / loss
         features[f'{ticker}_rsi'] = 100 - (100 / (1 + rs))
+        
+        # Bollinger Bands
+        rolling_mean = price_series.rolling(20).mean()
+        rolling_std = price_series.rolling(20).std()
+        features[f'{ticker}_bb_upper'] = (price_series - (rolling_mean + 2 * rolling_std)) / rolling_std
+        features[f'{ticker}_bb_lower'] = ((rolling_mean - 2 * rolling_std) - price_series) / rolling_std
+        
+        # Volume (simulado para datos reales)
+        features[f'{ticker}_volume_ratio'] = price_series.rolling(10).std() / price_series.rolling(30).std()
     
     return features.dropna()
 
-def train_random_forest_models(X, y, test_size=0.2):
-    """Entrena modelos Random Forest para cada activo"""
+def train_models(X, y):
+    """Entrena modelos Random Forest"""
     models = {}
-    performance = {}
+    feature_importances = {}
     
-    # División temporal
-    split_idx = int(len(X) * (1 - test_size))
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
+    split_idx = int(len(X) * 0.8)
+    X_train = X.iloc[:split_idx]
+    y_train = y.iloc[:split_idx]
     
-    progress_bar = st.progress(0)
-    
-    for i, asset in enumerate(y.columns):
-        # Filtrar NaN
-        mask = ~(y_train[asset].isna() | X_train.isna().any(axis=1))
-        if mask.sum() < 100:  # Mínimo de observaciones
-            continue
+    for asset in y.columns:
+        try:
+            valid_mask = ~(y_train[asset].isna() | X_train.isna().any(axis=1))
             
-        X_asset = X_train[mask]
-        y_asset = y_train[asset][mask]
-        
-        # Entrenar modelo
-        rf = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=8,
-            min_samples_split=20,
-            random_state=42,
-            n_jobs=1
-        )
-        
-        rf.fit(X_asset, y_asset)
-        models[asset] = rf
-        
-        # Evaluar
-        if len(X_test) > 0:
-            test_mask = ~(y_test[asset].isna() | X_test.isna().any(axis=1))
-            if test_mask.sum() > 10:
-                X_test_clean = X_test[test_mask]
-                y_test_clean = y_test[asset][test_mask]
-                
-                predictions = rf.predict(X_test_clean)
-                mse = mean_squared_error(y_test_clean, predictions)
-                mae = mean_absolute_error(y_test_clean, predictions)
-                
-                # Dirección accuracy
-                direction_acc = np.mean(
-                    np.sign(y_test_clean) == np.sign(predictions)
-                )
-                
-                performance[asset] = {
-                    'MSE': mse,
-                    'MAE': mae,
-                    'Direction_Accuracy': direction_acc,
-                    'R2_train': rf.score(X_asset, y_asset)
-                }
-        
-        progress_bar.progress((i + 1) / len(y.columns))
+            if valid_mask.sum() < 50:
+                continue
+            
+            X_clean = X_train[valid_mask]
+            y_clean = y_train[asset][valid_mask]
+            
+            rf = RandomForestRegressor(
+                n_estimators=50,
+                max_depth=8,
+                min_samples_split=5,
+                random_state=42,
+                n_jobs=-1
+            )
+            
+            rf.fit(X_clean, y_clean)
+            models[asset] = rf
+            feature_importances[asset] = rf.feature_importances_
+            
+        except Exception as e:
+            continue
     
-    progress_bar.empty()
-    return models, performance
+    return models, feature_importances
 
-def markowitz_optimization(expected_returns, cov_matrix, risk_aversion=2, max_weight=0.25):
-    """Optimización de Markowitz"""
+def predict_returns(models, current_features):
+    """Predice rendimientos usando los modelos Random Forest"""
+    predicted_returns = {}
+    
+    for asset, model in models.items():
+        try:
+            prediction = model.predict(current_features.values.reshape(1, -1))[0]
+            predicted_returns[asset] = prediction
+        except Exception as e:
+            predicted_returns[asset] = 0
+    
+    return predicted_returns
+
+def optimize_portfolio(expected_returns, cov_matrix, risk_aversion=2):
+    """Optimización de Markowitz usando rendimientos esperados"""
     n_assets = len(expected_returns)
     
     def objective(weights):
-        portfolio_return = np.dot(weights, expected_returns)
-        portfolio_variance = np.dot(weights, np.dot(cov_matrix, weights))
-        return -(portfolio_return - (risk_aversion/2) * portfolio_variance)
+        ret = np.dot(weights, expected_returns)
+        risk = np.dot(weights, np.dot(cov_matrix, weights))
+        return -(ret - risk_aversion * risk)
     
     constraints = [{'type': 'eq', 'fun': lambda x: np.sum(x) - 1}]
-    bounds = [(0, max_weight) for _ in range(n_assets)]
+    bounds = [(0.05, 0.4) for _ in range(n_assets)]
     
-    result = minimize(
-        objective,
-        x0=np.ones(n_assets) / n_assets,
-        method='SLSQP',
-        bounds=bounds,
-        constraints=constraints,
-        options={'maxiter': 1000}
-    )
-    
-    return result.x if result.success else np.ones(n_assets) / n_assets
+    try:
+        result = minimize(
+            objective,
+            x0=np.ones(n_assets) / n_assets,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints
+        )
+        
+        if result.success:
+            return result.x
+        else:
+            return np.ones(n_assets) / n_assets
+    except:
+        return np.ones(n_assets) / n_assets
 
-def calculate_portfolio_metrics(returns):
-    """Calcula métricas de performance del portafolio"""
-    total_return = (1 + returns).prod() - 1
-    annual_return = (1 + returns.mean())**252 - 1
-    annual_volatility = returns.std() * np.sqrt(252)
-    sharpe_ratio = annual_return / annual_volatility if annual_volatility > 0 else 0
+def calculate_metrics(returns_list):
+    """Calcula métricas de performance"""
+    if len(returns_list) == 0:
+        return {}
     
-    # Max Drawdown
-    cumulative = (1 + returns).cumprod()
-    running_max = cumulative.expanding().max()
-    drawdown = (cumulative - running_max) / running_max
-    max_drawdown = drawdown.min()
+    returns_array = np.array(returns_list)
+    
+    total_ret = np.prod(1 + returns_array) - 1
+    mean_ret = np.mean(returns_array)
+    vol = np.std(returns_array)
+    
+    annual_ret = (1 + mean_ret)**252 - 1
+    annual_vol = vol * np.sqrt(252)
+    sharpe = annual_ret / annual_vol if annual_vol > 0 else 0
+    
+    # Máximo drawdown
+    cumulative = np.cumprod(1 + returns_array)
+    peak = np.maximum.accumulate(cumulative)
+    drawdown = (cumulative - peak) / peak
+    max_drawdown = np.min(drawdown)
     
     return {
-        'Total Return': total_return,
-        'Annual Return': annual_return,
-        'Annual Volatility': annual_volatility,
-        'Sharpe Ratio': sharpe_ratio,
+        'Total Return': total_ret,
+        'Annual Return': annual_ret,
+        'Annual Volatility': annual_vol,
+        'Sharpe Ratio': sharpe,
         'Max Drawdown': max_drawdown,
-        'Win Rate': (returns > 0).mean()
+        'Win Rate': np.mean(returns_array > 0)
     }
 
-def create_performance_plots(portfolio_returns, benchmark_returns, weights_history):
-    """Crea gráficos de performance"""
-    
-    if not PLOTLY_AVAILABLE:
-        st.error("Plotly no disponible - usando visualizaciones alternativas")
-        
-        # Visualizaciones alternativas con matplotlib/streamlit nativo
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Performance acumulada usando line_chart nativo de streamlit
-            portfolio_cum = (1 + portfolio_returns).cumprod()
-            benchmark_cum = (1 + benchmark_returns).cumprod()
-            
-            performance_df = pd.DataFrame({
-                'RF + Markowitz': portfolio_cum.values,
-                'Benchmark': benchmark_cum.values
-            })
-            
-            st.line_chart(performance_df)
-            st.caption("Rendimiento Acumulado")
-        
-        with col2:
-            # Distribución usando histograma nativo
-            hist_df = pd.DataFrame({
-                'Portfolio': portfolio_returns.values,
-                'Benchmark': benchmark_returns.values
-            })
-            
-            st.bar_chart(pd.Series(portfolio_returns.values).value_counts().sort_index().head(20))
-            st.caption("Distribución de Rendimientos")
-        
-        return None, None, None, None
-    
-    # 1. Performance acumulada
-    fig1 = go.Figure()
-    
-    portfolio_cum = (1 + portfolio_returns).cumprod()
-    benchmark_cum = (1 + benchmark_returns).cumprod()
-    
-    fig1.add_trace(go.Scatter(
-        x=portfolio_cum.index, 
-        y=portfolio_cum.values,
-        mode='lines',
-        name='RF + Markowitz',
-        line=dict(color='#2E86C1', width=2)
-    ))
-    
-    fig1.add_trace(go.Scatter(
-        x=benchmark_cum.index, 
-        y=benchmark_cum.values,
-        mode='lines',
-        name='Benchmark',
-        line=dict(color='#E74C3C', width=2)
-    ))
-    
-    fig1.update_layout(
-        title='Rendimiento Acumulado',
-        xaxis_title='Fecha',
-        yaxis_title='Valor del Portafolio',
-        height=400
-    )
-    
-    # 2. Drawdown
-    portfolio_dd = (portfolio_cum / portfolio_cum.expanding().max() - 1)
-    
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(
-        x=portfolio_dd.index,
-        y=portfolio_dd.values,
-        fill='tonexty',
-        mode='lines',
-        name='Drawdown',
-        line=dict(color='red')
-    ))
-    
-    fig2.update_layout(
-        title='Drawdown del Portafolio',
-        xaxis_title='Fecha',
-        yaxis_title='Drawdown (%)',
-        height=300
-    )
-    
-    # 3. Distribución de rendimientos
-    fig3 = go.Figure()
-    fig3.add_trace(go.Histogram(
-        x=portfolio_returns.values,
-        nbinsx=50,
-        name='Portfolio',
-        opacity=0.7
-    ))
-    fig3.add_trace(go.Histogram(
-        x=benchmark_returns.values,
-        nbinsx=50,
-        name='Benchmark',
-        opacity=0.7
-    ))
-    
-    fig3.update_layout(
-        title='Distribución de Rendimientos Diarios',
-        xaxis_title='Rendimiento',
-        yaxis_title='Frecuencia',
-        height=300
-    )
-    
-    # 4. Evolución de pesos
-    fig4 = go.Figure()
-    
-    if len(weights_history) > 0:
-        for i, ticker in enumerate(weights_history.columns):
-            fig4.add_trace(go.Scatter(
-                x=weights_history.index,
-                y=weights_history[ticker].values,
-                mode='lines',
-                name=ticker,
-                stackgroup='one'
-            ))
-    
-    fig4.update_layout(
-        title='Evolución de Pesos del Portafolio',
-        xaxis_title='Fecha de Rebalanceo',
-        yaxis_title='Peso (%)',
-        height=400
-    )
-    
-    return fig1, fig2, fig3, fig4
-
-# ====================================================================
-# INTERFAZ PRINCIPAL
-# ====================================================================
-
-def main():
-    # Título principal
+def explain_random_forest():
+    """Explicación pedagógica del Random Forest"""
     st.markdown("""
-    <div class="main-header">
-        <h1>📊 Random Forest + Markowitz Portfolio Optimizer</h1>
-        <p>Práctica Académica Interactiva para Construcción de Portafolios Inteligentes</p>
+    <div class="analogy-box">
+    <h3>🎓 ¿CÓMO EXPLICAR RANDOM FOREST A ALUMNOS?</h3>
     </div>
     """, unsafe_allow_html=True)
     
-    # Sidebar para configuración
-    st.sidebar.header("⚙️ Configuración del Análisis")
+    col1, col2 = st.columns(2)
     
-    # Selección de activos
-    st.sidebar.subheader("🏢 Universo de Inversión")
+    with col1:
+        st.markdown("""
+        ### 🤖 Analogía: El Equipo de Expertos
+        
+        **Imagina que tenemos 50 analistas financieros:**  
+        - Cada uno es **especialista** en algo diferente  
+        - Analizan **indicadores técnicos** (momentum, volatilidad, etc.)  
+        - **Cada uno da su predicción** independiente  
+        - Al final, **votamos** y seguimos la recomendación mayoritaria  
+        
+        **¡Eso es Random Forest!**  
+        - Cada árbol = 1 analista  
+        - El bosque = equipo completo  
+        - Predicción final = promedio de todas las opiniones  
+        """)
+    
+    with col2:
+        st.markdown("""
+        ### 🎯 En Nuestro Código
+        
+        **1. Entrenamiento:**  
+        ```python
+        rf = RandomForestRegressor(
+            n_estimators=50,    # 50 "analistas"
+            max_depth=8,        # Cada uno hace 8 preguntas
+        )
+        rf.fit(características, objetivos)
+        ```
+        
+        **2. Predicción:**  
+        - Cada árbol analiza los indicadores actuales  
+        - Da su predicción de rendimiento futuro  
+        - Promediamos todas las predicciones  
+        
+        **3. Optimización:**  
+        - Usamos estas predicciones en Markowitz  
+        - Portafolio se basa en **futuro esperado** no solo pasado  
+        """)
+    
+    st.markdown("""
+    <div class="feature-card">
+    <h4>📊 Ventajas vs Enfoque Tradicional</h4>
+    <ul>
+    <li><strong>🤖 Inteligencia colectiva:</strong> 50 árboles > 1 árbol</li>
+    <li><strong>📈 Captura patrones complejos:</strong> No solo tendencias lineales</li>
+    <li><strong>🛡️ Robustez:</strong> Si un árbol se equivoca, otros compensan</li>
+    <li><strong>🔍 Interpretabilidad:</strong> Podemos ver qué variables importan más</li>
+    </ul>
+    </div>
+    """, unsafe_allow_html=True)
+
+# APLICACIÓN PRINCIPAL
+def main():
+    st.markdown("""
+    <div class="main-header">
+        <h1>🤖 Random Forest + Markowitz Portfolio</h1>
+        <p>Práctica Académica - Machine Learning en Finanzas Cuantitativas</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar
+    st.sidebar.header("⚙️ Configuración")
     
     asset_universe = st.sidebar.selectbox(
-        "Seleccionar universo:",
-        ["ETFs Sectoriales S&P 500", "Tech Stocks", "Personalizado"],
-        index=0
+        "Universo de inversión:",
+        ["ETFs Sectoriales", "Tech Stocks"]
     )
     
-    if asset_universe == "ETFs Sectoriales S&P 500":
-        tickers = ['XLF', 'XLK', 'XLV', 'XLI', 'XLE', 'XLY', 'XLP', 'XLB', 'XLU']
+    if asset_universe == "ETFs Sectoriales":
+        tickers = ['XLF', 'XLK', 'XLV', 'XLI', 'XLE']
         ticker_names = {
-            'XLF': 'Financials', 'XLK': 'Technology', 'XLV': 'Healthcare',
-            'XLI': 'Industrials', 'XLE': 'Energy', 'XLY': 'Consumer Disc.',
-            'XLP': 'Consumer Staples', 'XLB': 'Materials', 'XLU': 'Utilities'
+            'XLF': 'Financials',
+            'XLK': 'Technology', 
+            'XLV': 'Healthcare',
+            'XLI': 'Industrials',
+            'XLE': 'Energy'
         }
-    elif asset_universe == "Tech Stocks":
-        tickers = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'META', 'TSLA', 'NVDA']
-        ticker_names = {t: t for t in tickers}
     else:
-        ticker_input = st.sidebar.text_input(
-            "Ingrese tickers separados por coma:",
-            "AAPL,GOOGL,MSFT,AMZN"
-        )
-        tickers = [t.strip().upper() for t in ticker_input.split(',')]
+        tickers = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'META']
         ticker_names = {t: t for t in tickers}
     
-    # Parámetros temporales
-    st.sidebar.subheader("📅 Período de Análisis")
+    end_date = st.sidebar.date_input("Fecha final:", datetime.now().date())
+    start_date = st.sidebar.date_input("Fecha inicial:", end_date - timedelta(days=730))
     
-    end_date = st.sidebar.date_input(
-        "Fecha final:",
-        value=datetime.now().date()
-    )
+    prediction_horizon = st.sidebar.slider("Horizonte predicción (días):", 5, 42, 21)
+    risk_aversion = st.sidebar.slider("Aversión al riesgo:", 0.5, 5.0, 2.0)
     
-    start_date = st.sidebar.date_input(
-        "Fecha inicial:",
-        value=end_date - timedelta(days=3*365)  # 3 años por defecto
-    )
+    # Explicación pedagógica
+    with st.sidebar.expander("🎓 Explicación RF para Clases"):
+        st.markdown("""
+        **Para enseñar a alumnos:**
+        - Analogía: 50 analistas votando
+        - Cada árbol = especialista diferente
+        - Votación mayoritaria = predicción final
+        - Ventaja: captura patrones complejos
+        """)
     
-    # Parámetros del modelo
-    st.sidebar.subheader("🤖 Parámetros del Modelo")
+    run_analysis = st.sidebar.button("🚀 Ejecutar Análisis Completo", type="primary")
     
-    prediction_horizon = st.sidebar.slider(
-        "Horizonte de predicción (días):",
-        min_value=5, max_value=63, value=21
-    )
-    
-    risk_aversion = st.sidebar.slider(
-        "Aversión al riesgo:",
-        min_value=0.5, max_value=10.0, value=2.0, step=0.5
-    )
-    
-    max_weight = st.sidebar.slider(
-        "Peso máximo por activo (%):",
-        min_value=5, max_value=50, value=25
-    ) / 100
-    
-    rebalance_freq = st.sidebar.selectbox(
-        "Frecuencia de rebalanceo:",
-        [("Mensual", 21), ("Trimestral", 63), ("Semestral", 126)],
-        format_func=lambda x: x[0]
-    )[1]
-    
-    # Botón principal
-    run_analysis = st.sidebar.button("🚀 Ejecutar Análisis", type="primary")
-    
-    # Panel principal
     if not run_analysis:
-        # Pantalla de bienvenida
-        col1, col2 = st.columns([2, 1])
+        st.markdown("""
+        ## 📚 Bienvenido al Simulador Académico
         
-        with col1:
-            st.markdown("""
-            ## 🎓 Bienvenido a la Práctica Académica
-            
-            Esta aplicación implementa una estrategia híbrida que combina:
-            
-            ### 🌳 **Random Forest**
-            - Predice rendimientos futuros usando variables técnicas y macroeconómicas
-            - Maneja relaciones no-lineales entre variables
-            - Robusto ante outliers y ruido en los datos
-            
-            ### 📊 **Optimización de Markowitz**
-            - Construye portafolios eficientes en la frontera riesgo-retorno
-            - Considera correlaciones entre activos
-            - Aplica restricciones de peso y diversificación
-            
-            ### 📈 **Backtesting Robusto**
-            - Validación temporal sin look-ahead bias
-            - Rebalanceo periódico realista
-            - Comparación con benchmarks
-            
-            **Configure los parámetros en la barra lateral y presione "Ejecutar Análisis"**
-            """)
+        **Esta aplicación demuestra:**  
         
-        with col2:
-            st.markdown("""
-            <div class="success-box">
-                <h4>🔧 Funcionalidades:</h4>
-                <ul>
-                    <li>✅ Descarga automática de datos</li>
-                    <li>✅ Modelos ML entrenados en tiempo real</li>
-                    <li>✅ Optimización matemática</li>
-                    <li>✅ Visualizaciones interactivas</li>
-                    <li>✅ Métricas de performance</li>
-                    <li>✅ Exportación de resultados</li>
-                </ul>
-            </div>
-            """, unsafe_allow_html=True)
+        <div class="feature-card">
+        <strong>🤖 Random Forest:</strong> Predicción de rendimientos usando 50 "árboles-decisión"  
+        <strong>📊 Markowitz:</strong> Optimización matemática riesgo-retorno  
+        <strong>🔬 Backtesting:</strong> Validación histórica de la estrategia  
+        <strong>🎓 Pedagogía:</strong> Explicaciones para enseñanza en aula  
+        </div>
         
-        # Mostrar ejemplo de configuración
-        st.subheader("📋 Configuración Actual:")
-        config_df = pd.DataFrame({
-            'Parámetro': [
-                'Universo de inversión',
-                'Período de análisis', 
-                'Horizonte de predicción',
-                'Aversión al riesgo',
-                'Peso máximo por activo',
-                'Frecuencia de rebalanceo'
-            ],
-            'Valor': [
-                f"{asset_universe} ({len(tickers)} activos)",
-                f"{start_date} a {end_date}",
-                f"{prediction_horizon} días",
-                f"{risk_aversion}",
-                f"{max_weight*100:.0f}%",
-                f"Cada {rebalance_freq} días"
-            ]
-        })
-        st.table(config_df)
+        ### 🎯 Objetivos de Aprendizaje:
         
+        1. **Entender** cómo ML mejora la gestión de portafolios  
+        2. **Visualizar** el proceso completo de análisis cuantitativo  
+        3. **Comparar** enfoque tradicional vs machine learning  
+        4. **Interpretar** resultados para toma de decisiones  
+        
+        **👈 Configura los parámetros y presiona 'Ejecutar Análisis'**
+        """, unsafe_allow_html=True)
         return
     
-    # ===== ANÁLISIS PRINCIPAL =====
+    # SECCIÓN 1: EXPLICACIÓN PEDAGÓGICA
+    st.header("🎓 Explicación: Random Forest en Finanzas")
+    explain_random_forest()
     
-    with st.spinner("🔄 Iniciando análisis..."):
+    # SECCIÓN 2: ANÁLISIS DE DATOS
+    st.header("📊 Obtención y Análisis de Datos")
+    
+    with st.spinner("📥 Descargando datos del mercado..."):
+        asset_prices, data_type = get_market_data(tickers, start_date, end_date)
+    
+    if asset_prices.empty:
+        st.error("❌ No se pudieron obtener datos suficientes")
+        return
+    
+    if data_type == "simulado":
+        st.info("🔮 Usando datos simulados para demostración académica")
+    else:
+        st.success("✅ Datos reales obtenidos exitosamente")
+    
+    # Mostrar resumen de datos
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Días de datos", len(asset_prices))
+    with col2:
+        st.metric("Activos analizados", asset_prices.shape[1])
+    with col3:
+        st.metric("Período análisis", f"{(end_date - start_date).days} días")
+    
+    # Gráfico de precios
+    st.subheader("📈 Evolución de Precios")
+    normalized_prices = (asset_prices / asset_prices.iloc[0] * 100)
+    st.line_chart(normalized_prices)
+    
+    # SECCIÓN 3: INGENIERÍA DE CARACTERÍSTICAS
+    st.header("🔧 Ingeniería de Características")
+    
+    with st.spinner("🧠 Calculando indicadores técnicos..."):
+        features = calculate_features(asset_prices)
         
-        # 1. DESCARGA DE DATOS
-        st.subheader("📊 Descarga de Datos")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.info("Descargando datos de activos...")
-            asset_prices = download_market_data_robust(tickers, start_date, end_date)
-            
-            if asset_prices is None:
-                st.error("Error descargando datos de activos")
-                return
-            
-            st.success(f"✅ {len(asset_prices)} días de datos para {asset_prices.shape[1]} activos")
-        
-        with col2:
-            st.info("Descargando datos macroeconómicos...")
-            macro_data = download_macro_data(start_date, end_date)
-            
-            if macro_data is not None:
-                st.success(f"✅ Variables macro: {', '.join(macro_data.columns)}")
-            else:
-                st.warning("⚠️ No se pudieron descargar datos macro")
-        
-        # Mostrar estadísticas básicas
-        with st.expander("📈 Estadísticas de los Datos", expanded=False):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Precios finales:**")
-                final_prices = asset_prices.iloc[-1].sort_values(ascending=False)
-                st.bar_chart(final_prices)
-            
-            with col2:
-                st.write("**Rendimientos anualizados:**")
-                returns = asset_prices.pct_change().dropna()
-                annual_returns = (returns.mean() * 252 * 100).sort_values(ascending=False)
-                st.bar_chart(annual_returns)
-        
-        # 2. FEATURE ENGINEERING
-        st.subheader("🔧 Creación de Características")
-        
-        with st.spinner("Calculando indicadores técnicos..."):
-            technical_features = calculate_technical_indicators(asset_prices)
-            
-            # Combinar con macro si está disponible
-            if macro_data is not None:
-                # Alinear fechas
-                common_dates = technical_features.index.intersection(macro_data.index)
-                if len(common_dates) > 100:
-                    all_features = pd.concat([
-                        technical_features.loc[common_dates],
-                        macro_data.loc[common_dates]
-                    ], axis=1).dropna()
-                else:
-                    all_features = technical_features.dropna()
-            else:
-                all_features = technical_features.dropna()
-        
-        # Crear targets
         returns = asset_prices.pct_change().dropna()
         targets = pd.DataFrame(index=returns.index, columns=returns.columns)
         for col in returns.columns:
             targets[col] = returns[col].shift(-prediction_horizon)
         
-        # Alinear fechas
-        common_dates = all_features.index.intersection(targets.index)
-        X = all_features.loc[common_dates]
+        common_dates = features.index.intersection(targets.index)
+        X = features.loc[common_dates].fillna(method='ffill').fillna(0)
         y = targets.loc[common_dates]
+    
+    st.success(f"✅ {X.shape[1]} características creadas para {len(X)} observaciones")
+    
+    # Mostrar ejemplos de características
+    st.subheader("📋 Ejemplo de Características Calculadas")
+    st.dataframe(X.head().style.format("{:.4f}"))
+    
+    # SECCIÓN 4: ENTRENAMIENTO DEL MODELO
+    st.header("🤖 Entrenamiento del Random Forest")
+    
+    with st.spinner("🌳 Entrenando 50 árboles de decisión..."):
+        models, feature_importances = train_models(X, y)
+    
+    if len(models) == 0:
+        st.error("❌ No se pudieron entrenar modelos válidos")
+        return
+    
+    st.success(f"✅ {len(models)} modelos entrenados exitosamente")
+    
+    # Importancia de características
+    st.subheader("🎯 Importancia de Características")
+    
+    if len(models) > 0:
+        example_asset = list(models.keys())[0]
+        importance_df = pd.DataFrame({
+            'Característica': X.columns,
+            'Importancia': feature_importances[example_asset]
+        }).sort_values('Importancia', ascending=False).head(10)
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns([2, 1])
+        
         with col1:
-            st.metric("📊 Observaciones", len(X))
+            st.bar_chart(importance_df.set_index('Característica')['Importancia'])
+        
         with col2:
-            st.metric("🔢 Características", X.shape[1])
-        with col3:
-            st.metric("🎯 Activos objetivo", y.shape[1])
+            st.write("**Top 5 Características:**")
+            for i, row in importance_df.head().iterrows():
+                st.write(f"• {row['Característica'].split('_')[-1]}: {row['Importancia']:.3f}")
+    
+    # SECCIÓN 5: BACKTESTING Y OPTIMIZACIÓN
+    st.header("🔄 Backtesting con Predicciones RF")
+    
+    with st.spinner("⚡ Ejecutando simulación histórica..."):
         
-        # 3. ENTRENAMIENTO DE MODELOS
-        st.subheader("🤖 Entrenamiento de Random Forest")
+        split_idx = int(len(returns) * 0.7)
+        test_period = returns.iloc[split_idx:]
         
-        with st.spinner("Entrenando modelos de Machine Learning..."):
-            models, performance = train_random_forest_models(X, y)
+        portfolio_rets = []
+        benchmark_rets = []
+        all_weights = []
+        rf_predictions_history = []
+        historical_predictions_history = []
         
-        if models:
-            st.success(f"✅ {len(models)} modelos entrenados exitosamente")
-            
-            # Mostrar performance
-            perf_df = pd.DataFrame(performance).T
-            if not perf_df.empty:
-                st.write("**Performance de los modelos:**")
-                st.dataframe(perf_df.round(4))
-        else:
-            st.error("❌ No se pudieron entrenar modelos")
-            return
+        n_periods = min(6, len(test_period) // 30)
+        if n_periods == 0:
+            n_periods = 1
+        period_length = len(test_period) // n_periods
         
-        # 4. BACKTESTING
-        st.subheader("🔄 Ejecución del Backtesting")
-        
-        with st.spinner("Ejecutando backtesting con rebalanceo..."):
+        for period in range(n_periods):
+            start_p = period * period_length
+            end_p = min((period + 1) * period_length, len(test_period))
             
-            # Configurar backtesting
-            backtest_start_idx = max(252, len(X) // 3)  # Empezar con suficientes datos
-            backtest_dates = X.index[backtest_start_idx::rebalance_freq]
+            if end_p <= start_p + prediction_horizon:
+                break
             
-            portfolio_returns = []
-            benchmark_returns = []
-            weights_history = []
-            rebalance_dates = []
+            # PREDICCIÓN CON RANDOM FOREST
+            current_date = test_period.index[start_p]
+            current_features_row = features.loc[current_date]
+            rf_predicted_returns = predict_returns(models, current_features_row)
+            rf_expected_returns = np.array([rf_predicted_returns.get(ticker, 0) for ticker in tickers])
             
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            # Predicción histórica (para comparación)
+            hist_data = returns.iloc[:split_idx + start_p]
+            historical_expected_returns = hist_data.tail(63).mean().values * 252
             
-            for i, rebalance_date in enumerate(backtest_dates[:-1]):
-                status_text.text(f"Procesando rebalanceo {i+1}/{len(backtest_dates)-1}: {rebalance_date.date()}")
+            # Matriz de covarianzas
+            cov_matrix = hist_data.tail(126).cov().values * 252
+            
+            # Optimización con predicciones RF
+            weights = optimize_portfolio(rf_expected_returns, cov_matrix, risk_aversion)
+            all_weights.append(weights)
+            
+            rf_predictions_history.append(rf_expected_returns)
+            historical_predictions_history.append(historical_expected_returns)
+            
+            # Cálculo de rendimientos
+            period_data = test_period.iloc[start_p:end_p]
+            
+            for _, day_returns in period_data.iterrows():
+                port_ret = np.sum(weights * day_returns.values)
+                bench_ret = np.mean(day_returns.values)
                 
-                try:
-                    # Datos históricos hasta la fecha
-                    hist_idx = X.index.get_loc(rebalance_date)
-                    X_hist = X.iloc[:hist_idx]
-                    y_hist = y.iloc[:hist_idx]
-                    
-                    if len(X_hist) < 100:
-                        continue
-                    
-                    # Predecir rendimientos esperados
-                    current_features = X.loc[rebalance_date:rebalance_date]
-                    expected_returns = pd.Series(index=asset_prices.columns, dtype=float)
-                    
-                    for asset in asset_prices.columns:
-                        if asset in models and len(current_features) > 0:
-                            try:
-                                pred = models[asset].predict(current_features.fillna(0))[0]
-                                expected_returns[asset] = pred * 252  # Anualizar
-                            except:
-                                expected_returns[asset] = returns[asset].mean() * 252
-                        else:
-                            expected_returns[asset] = returns[asset].mean() * 252
-                    
-                    # Calcular matriz de covarianzas
-                    recent_returns = returns.loc[returns.index <= rebalance_date].tail(min(252, len(returns)))
-                    cov_matrix = recent_returns.cov() * 252  # Anualizada
-                    
-                    # Optimizar portafolio
-                    weights = markowitz_optimization(expected_returns, cov_matrix, risk_aversion, max_weight)
-                    weights_series = pd.Series(weights, index=asset_prices.columns)
-                    
-                    weights_history.append(weights_series)
-                    rebalance_dates.append(rebalance_date)
-                    
-                    # Calcular rendimientos del período siguiente
-                    next_date_idx = min(hist_idx + rebalance_freq, len(X) - 1)
-                    period_returns = returns.iloc[hist_idx+1:next_date_idx+1]
-                    
-                    if len(period_returns) > 0:
-                        portfolio_period_returns = (period_returns * weights_series).sum(axis=1)
-                        benchmark_period_returns = period_returns.mean(axis=1)
-                        
-                        portfolio_returns.extend(portfolio_period_returns.tolist())
-                        benchmark_returns.extend(benchmark_period_returns.tolist())
-                    
-                except Exception as e:
-                    st.warning(f"Error en rebalanceo {i+1}: {str(e)[:100]}")
-                    continue
-                
-                progress_bar.progress((i + 1) / (len(backtest_dates) - 1))
-            
-            status_text.empty()
-            progress_bar.empty()
+                portfolio_rets.append(port_ret)
+                benchmark_rets.append(bench_ret)
         
-        # Convertir a Series
-        if portfolio_returns:
-            portfolio_returns = pd.Series(portfolio_returns)
-            benchmark_returns = pd.Series(benchmark_returns)
-            weights_df = pd.DataFrame(weights_history, index=rebalance_dates, columns=asset_prices.columns)
+        final_weights = np.mean(all_weights, axis=0) if all_weights else np.ones(len(tickers)) / len(tickers)
+    
+    if len(portfolio_rets) == 0:
+        st.error("❌ No se generaron datos de backtesting")
+        return
+    
+    st.success(f"✅ Backtesting completado: {len(portfolio_rets)} días, {n_periods} rebalanceos")
+    
+    # SECCIÓN 6: RESULTADOS Y COMPARACIÓN
+    st.header("📊 Resultados de la Estrategia")
+    
+    # Métricas
+    port_metrics = calculate_metrics(portfolio_rets)
+    bench_metrics = calculate_metrics(benchmark_rets)
+    
+    # Comparación lado a lado
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 🤖 RF + Markowitz")
+        st.metric("Retorno Anual", f"{port_metrics.get('Annual Return', 0):.2%}")
+        st.metric("Volatilidad Anual", f"{port_metrics.get('Annual Volatility', 0):.2%}")
+        st.metric("Sharpe Ratio", f"{port_metrics.get('Sharpe Ratio', 0):.3f}")
+        st.metric("Máximo Drawdown", f"{port_metrics.get('Max Drawdown', 0):.2%}")
+        st.metric("Tasa de Éxito", f"{port_metrics.get('Win Rate', 0):.1%}")
+    
+    with col2:
+        st.markdown("### 📈 Benchmark (Equal Weight)")
+        st.metric("Retorno Anual", f"{bench_metrics.get('Annual Return', 0):.2%}", 
+                 delta=f"{(port_metrics.get('Annual Return', 0) - bench_metrics.get('Annual Return', 0)):.2%}")
+        st.metric("Volatilidad Anual", f"{bench_metrics.get('Annual Volatility', 0):.2%}",
+                 delta=f"{(port_metrics.get('Annual Volatility', 0) - bench_metrics.get('Annual Volatility', 0)):.2%}")
+        st.metric("Sharpe Ratio", f"{bench_metrics.get('Sharpe Ratio', 0):.3f}",
+                 delta=f"{(port_metrics.get('Sharpe Ratio', 0) - bench_metrics.get('Sharpe Ratio', 0)):.3f}")
+        st.metric("Máximo Drawdown", f"{bench_metrics.get('Max Drawdown', 0):.2%}")
+        st.metric("Tasa de Éxito", f"{bench_metrics.get('Win Rate', 0):.1%}")
+    
+    # Gráfico de performance
+    st.subheader("📈 Performance Acumulada")
+    try:
+        port_cumulative = np.cumprod(1 + np.array(portfolio_rets))
+        bench_cumulative = np.cumprod(1 + np.array(benchmark_rets))
+        
+        performance_df = pd.DataFrame({
+            'RF + Markowitz': port_cumulative,
+            'Benchmark': bench_cumulative
+        })
+        
+        st.line_chart(performance_df)
+    except Exception as e:
+        st.error(f"Error en gráfico: {str(e)}")
+    
+    # SECCIÓN 7: COMPOSICIÓN DEL PORTAFOLIO
+    st.header("💼 Composición Óptima del Portafolio")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📋 Distribución Recomendada")
+        
+        weights_df = pd.DataFrame({
+            'Activo': tickers,
+            'Sector': [ticker_names.get(t, t) for t in tickers],
+            'Peso': final_weights,
+            'Peso %': [f"{w*100:.1f}%" for w in final_weights]
+        }).sort_values('Peso', ascending=False)
+        
+        st.dataframe(weights_df[['Activo', 'Sector', 'Peso %']], hide_index=True)
+        
+        # Ejemplo de inversión
+        st.subheader("💰 Ejemplo Práctico")
+        inversion = st.number_input("Monto a invertir ($):", min_value=1000, value=10000, step=1000)
+        
+        if inversion > 0:
+            for ticker, weight in zip(tickers, final_weights):
+                if weight > 0.01:
+                    st.write(f"**{ticker}**: ${weight * inversion:,.0f} ({weight*100:.1f}%)")
+    
+    with col2:
+        st.subheader("📊 Visualización de Pesos")
+        
+        # Gráfico de barras
+        chart_df = weights_df[weights_df['Peso'] > 0.01].copy()
+        if not chart_df.empty:
+            st.bar_chart(chart_df.set_index('Activo')['Peso'])
         else:
-            st.error("❌ No se pudieron calcular rendimientos del backtest")
-            return
+            st.info("Todos los pesos son muy pequeños para visualizar")
         
-        # 5. RESULTADOS Y VISUALIZACIONES
-        st.subheader("📊 Resultados del Análisis")
-        
-        # Métricas principales
-        portfolio_metrics = calculate_portfolio_metrics(portfolio_returns)
-        benchmark_metrics = calculate_portfolio_metrics(benchmark_returns)
-        
+        # Pie chart simplificado
+        st.subheader("🎯 Resumen de Asignación")
+        high_weight_assets = weights_df[weights_df['Peso'] > 0.1]
+        if len(high_weight_assets) > 0:
+            for _, row in high_weight_assets.iterrows():
+                st.write(f"▪️ **{row['Activo']}**: {row['Peso %']}")
+        else:
+            st.write("Asignación bastante diversificada")
+    
+    # SECCIÓN 8: ANÁLISIS DE PREDICCIONES
+    st.header("🔮 Análisis de Predicciones RF")
+    
+    if rf_predictions_history:
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown("### 🤖 Random Forest + Markowitz")
-            st.metric("Retorno Total", f"{portfolio_metrics['Total Return']:.2%}")
-            st.metric("Retorno Anualizado", f"{portfolio_metrics['Annual Return']:.2%}")
-            st.metric("Volatilidad Anualizada", f"{portfolio_metrics['Annual Volatility']:.2%}")
-            st.metric("Ratio de Sharpe", f"{portfolio_metrics['Sharpe Ratio']:.3f}")
-            st.metric("Máximo Drawdown", f"{portfolio_metrics['Max Drawdown']:.2%}")
-            st.metric("Win Rate", f"{portfolio_metrics['Win Rate']:.1%}")
+            st.subheader("📈 Últimas Predicciones RF")
+            last_rf_pred = rf_predictions_history[-1] * 252 * 100
+            pred_df = pd.DataFrame({
+                'Activo': tickers,
+                'Predicción Anual %': last_rf_pred
+            }).sort_values('Predicción Anual %', ascending=False)
+            
+            for _, row in pred_df.iterrows():
+                delta = f"{row['Predicción Anual %']:.1f}%"
+                st.metric(f"{row['Activo']} ({ticker_names[row['Activo']]})", 
+                         value=f"{row['Predicción Anual %']:.1f}%")
         
         with col2:
-            st.markdown("### 📈 Benchmark (Equal Weight)")
-            st.metric("Retorno Total", f"{benchmark_metrics['Total Return']:.2%}")
-            st.metric("Retorno Anualizado", f"{benchmark_metrics['Annual Return']:.2%}")
-            st.metric("Volatilidad Anualizada", f"{benchmark_metrics['Annual Volatility']:.2%}")
-            st.metric("Ratio de Sharpe", f"{benchmark_metrics['Sharpe Ratio']:.3f}")
-            st.metric("Máximo Drawdown", f"{benchmark_metrics['Max Drawdown']:.2%}")
-            st.metric("Win Rate", f"{benchmark_metrics['Win Rate']:.1%}")
-        
-        # Métricas de valor añadido
-        excess_returns = portfolio_returns - benchmark_returns
-        alpha = excess_returns.mean() * 252
-        tracking_error = excess_returns.std() * np.sqrt(252)
-        information_ratio = alpha / tracking_error if tracking_error > 0 else 0
-        
-        st.markdown("### ⭐ Valor Añadido")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Alfa Anualizada", f"{alpha:.2%}")
-        with col2:
-            st.metric("Information Ratio", f"{information_ratio:.3f}")
-        with col3:
-            outperform_rate = (portfolio_returns > benchmark_returns).mean()
-            st.metric("% Días Superó Benchmark", f"{outperform_rate:.1%}")
-        
-        # Gráficos principales
-        st.subheader("📈 Visualizaciones de Performance")
-        
-        fig1, fig2, fig3, fig4 = create_performance_plots(portfolio_returns, benchmark_returns, weights_df)
-        
-        # Layout de gráficos
-        if PLOTLY_AVAILABLE and fig1 is not None:
-            col1, col2 = st.columns(2)
+            st.subheader("📊 Comparación de Métodos")
+            st.write("**RF vs Historical Mean**")
             
-            with col1:
-                st.plotly_chart(fig1, use_container_width=True)
-                st.plotly_chart(fig3, use_container_width=True)
+            # Calcular accuracy simple
+            actual_returns = returns.mean().values * 252 * 100
+            rf_accuracy = np.mean(np.abs(last_rf_pred - actual_returns))
             
-            with col2:
-                st.plotly_chart(fig2, use_container_width=True)
-                st.plotly_chart(fig4, use_container_width=True)
-        else:
-            st.info("Visualizaciones básicas mostradas arriba (Plotly no disponible)")
+            st.metric("Error Absoluto Promedio RF", f"{rf_accuracy:.1f}%")
+            st.metric("Número de Rebalanceos", n_periods)
+            st.metric("Horizonte de Predicción", f"{prediction_horizon} días")
+    
+    # SECCIÓN 9: CONCLUSIONES PEDAGÓGICAS
+    st.header("🎯 Conclusiones para el Aula")
+    
+    excess_return = port_metrics.get('Annual Return', 0) - bench_metrics.get('Annual Return', 0)
+    sharpe_diff = port_metrics.get('Sharpe Ratio', 0) - bench_metrics.get('Sharpe Ratio', 0)
+    
+    if excess_return > 0 and sharpe_diff > 0:
+        st.success("""
+        ## 🏆 **ESTRATEGIA EXITOSA**
         
-        # Análisis adicional
-        with st.expander("🔍 Análisis Avanzado", expanded=False):
-            
-            # Tabla de composición promedio
-            st.markdown("#### 💼 Composición Promedio del Portafolio")
-            avg_weights = weights_df.mean().sort_values(ascending=False)
-            composition_df = pd.DataFrame({
-                'Activo': avg_weights.index,
-                'Peso Promedio (%)': (avg_weights * 100).round(1),
-                'Descripción': [ticker_names.get(t, t) for t in avg_weights.index]
-            })
-            st.dataframe(composition_df, hide_index=True)
-            
-            # Correlación con benchmark
-            correlation = np.corrcoef(portfolio_returns, benchmark_returns)[0,1]
-            st.markdown(f"**Correlación con benchmark:** {correlation:.3f}")
-            
-            # Rolling Sharpe
-            if len(portfolio_returns) > 60:
-                rolling_sharpe = (portfolio_returns.rolling(60).mean() / 
-                                portfolio_returns.rolling(60).std() * np.sqrt(252))
-                
-                if PLOTLY_AVAILABLE:
-                    fig_sharpe = go.Figure()
-                    fig_sharpe.add_trace(go.Scatter(
-                        x=list(range(len(rolling_sharpe))),
-                        y=rolling_sharpe.values,
-                        mode='lines',
-                        name='Sharpe Ratio Móvil (60 días)'
-                    ))
-                    fig_sharpe.update_layout(
-                        title='Evolución del Sharpe Ratio',
-                        xaxis_title='Días',
-                        yaxis_title='Sharpe Ratio',
-                        height=300
-                    )
-                    st.plotly_chart(fig_sharpe, use_container_width=True)
-                else:
-                    # Alternativa con gráfico nativo de streamlit
-                    st.line_chart(rolling_sharpe.dropna())
-                    st.caption("Evolución del Sharpe Ratio (60 días)")
+        **El Random Forest añadió valor significativo:**
+        - ✅ Mejor retorno ajustado al riesgo
+        - ✅ Predicciones más precisas que la media histórica
+        - ✅ Optimización basada en señales predictivas
         
-        # Feature Importance
-        if models:
-            with st.expander("🧠 Importancia de Características", expanded=False):
-                st.markdown("#### Características más importantes para las predicciones:")
-                
-                # Calcular importancia promedio
-                feature_importance = pd.DataFrame(index=X.columns)
-                for asset, model in models.items():
-                    feature_importance[asset] = model.feature_importances_
-                
-                avg_importance = feature_importance.mean(axis=1).sort_values(ascending=False)
-                top_features = avg_importance.head(15)
-                
-                if PLOTLY_AVAILABLE:
-                    # Gráfico de barras con Plotly
-                    fig_importance = go.Figure(go.Bar(
-                        x=top_features.values,
-                        y=[f.replace('_', ' ').title() for f in top_features.index],
-                        orientation='h'
-                    ))
-                    
-                    fig_importance.update_layout(
-                        title='Top 15 Características Más Importantes',
-                        xaxis_title='Importancia',
-                        height=500
-                    )
-                    
-                    st.plotly_chart(fig_importance, use_container_width=True)
-                else:
-                    # Alternativa con gráfico nativo
-                    st.bar_chart(top_features)
-                    st.caption("Top 15 Características Más Importantes")
-                
-                # Tabla detallada
-                importance_df = pd.DataFrame({
-                    'Característica': top_features.index,
-                    'Importancia': top_features.values.round(4)
-                })
-                st.dataframe(importance_df, hide_index=True)
+        **Para la clase:** Demuestra cómo ML puede mejorar decisiones de inversión.
+        """)
+    elif excess_return > 0:
+        st.warning("""
+        ## ⚠️ **RESULTADO MIXTO**
         
-        # Exportación de resultados
-        st.subheader("💾 Exportar Resultados")
+        **El RF mejoró retornos pero con más riesgo:**
+        - 📈 Mayor retorno, pero mayor volatilidad
+        - 🤔 Puede necesitar ajuste de parámetros de riesgo
+        - 🔍 Interesante para análisis de trade-offs
         
-        col1, col2, col3 = st.columns(3)
+        **Para la clase:** Buen ejemplo de balance riesgo-retorno.
+        """)
+    else:
+        st.info("""
+        ## 📊 **CASO DE ESTUDIO**
         
-        with col1:
-            # CSV de rendimientos
-            results_df = pd.DataFrame({
-                'Date': portfolio_returns.index if hasattr(portfolio_returns, 'index') else range(len(portfolio_returns)),
-                'Portfolio_Returns': portfolio_returns.values,
-                'Benchmark_Returns': benchmark_returns.values,
-                'Excess_Returns': excess_returns.values,
-                'Portfolio_Cumulative': (1 + portfolio_returns).cumprod().values,
-                'Benchmark_Cumulative': (1 + benchmark_returns).cumprod().values
-            })
-            
-            csv_returns = results_df.to_csv(index=False)
-            st.download_button(
-                label="📊 Descargar Rendimientos",
-                data=csv_returns,
-                file_name=f"portfolio_returns_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv"
-            )
+        **El benchmark superó al RF en este período:**
+        - 📉 Contexto mercado específico
+        - 🔍 Oportunidad para analizar por qué
+        - 💡 ML no es magia - depende de datos y parámetros
         
-        with col2:
-            # CSV de pesos
-            if not weights_df.empty:
-                csv_weights = weights_df.to_csv()
-                st.download_button(
-                    label="⚖️ Descargar Pesos",
-                    data=csv_weights,
-                    file_name=f"portfolio_weights_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv"
-                )
-        
-        with col3:
-            # Reporte de métricas
-            metrics_report = f"""
-REPORTE DE PERFORMANCE - {datetime.now().strftime('%Y-%m-%d %H:%M')}
-{'='*60}
+        **Para la clase:** Enseña humildad y validación rigurosa.
+        """)
+    
+    # SECCIÓN 10: DESCARGAS Y REPORTES
+    st.header("💾 Material para Clases")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("📋 Generar Reporte de Análisis"):
+            report = f"""
+REPORTE ACADÉMICO - RANDOM FOREST + MARKOWITZ
+Fecha: {datetime.now().strftime('%Y-%m-%d')}
 
-CONFIGURACIÓN:
-- Universo: {asset_universe}
-- Período: {start_date} a {end_date}
-- Horizonte predicción: {prediction_horizon} días
-- Aversión al riesgo: {risk_aversion}
-- Peso máximo: {max_weight*100:.0f}%
-- Rebalanceo: cada {rebalance_freq} días
+RESULTADOS:
+- Retorno RF+Markowitz: {port_metrics.get('Annual Return', 0):.2%}
+- Retorno Benchmark: {bench_metrics.get('Annual Return', 0):.2%}
+- Sharpe Ratio RF: {port_metrics.get('Sharpe Ratio', 0):.3f}
+- Diferencial de Retorno: {excess_return:.2%}
 
-RESULTADOS PORTAFOLIO RF + MARKOWITZ:
-- Retorno Total: {portfolio_metrics['Total Return']:.2%}
-- Retorno Anualizado: {portfolio_metrics['Annual Return']:.2%}
-- Volatilidad Anualizada: {portfolio_metrics['Annual Volatility']:.2%}
-- Ratio de Sharpe: {portfolio_metrics['Sharpe Ratio']:.3f}
-- Máximo Drawdown: {portfolio_metrics['Max Drawdown']:.2%}
-- Win Rate: {portfolio_metrics['Win Rate']:.1%}
+COMPOSICIÓN ÓPTIMA:
+"""
+            for ticker, weight in zip(tickers, final_weights):
+                if weight > 0.01:
+                    report += f"- {ticker}: {weight*100:.1f}%\n"
+            
+            report += f"""
 
-RESULTADOS BENCHMARK:
-- Retorno Total: {benchmark_metrics['Total Return']:.2%}
-- Retorno Anualizado: {benchmark_metrics['Annual Return']:.2%}
-- Volatilidad Anualizada: {benchmark_metrics['Annual Volatility']:.2%}
-- Ratio de Sharpe: {benchmark_metrics['Sharpe Ratio']:.3f}
-- Máximo Drawdown: {benchmark_metrics['Max Drawdown']:.2%}
-- Win Rate: {benchmark_metrics['Win Rate']:.1%}
-
-VALOR AÑADIDO:
-- Alfa Anualizada: {alpha:.2%}
-- Information Ratio: {information_ratio:.3f}
-- % Días que superó benchmark: {outperform_rate:.1%}
-- Correlación con benchmark: {correlation:.3f}
-
-COMPOSICIÓN PROMEDIO:
-""" + '\n'.join([f"- {ticker}: {weight:.1%}" for ticker, weight in avg_weights.items()])
+LECCIONES PARA EL AULA:
+1. El RF {'mejoró' if excess_return > 0 else 'no mejoró'} el desempeño
+2. Importancia de validación con backtesting
+3. El ML complementa pero no reemplaza el análisis financiero
+"""
             
             st.download_button(
-                label="📋 Descargar Reporte",
-                data=metrics_report,
-                file_name=f"portfolio_report_{datetime.now().strftime('%Y%m%d')}.txt",
+                label="📥 Descargar Reporte",
+                data=report,
+                file_name=f"reporte_aula_{datetime.now().strftime('%Y%m%d')}.txt",
                 mime="text/plain"
             )
+    
+    with col2:
+        st.write("**🔄 Para volver a ejecutar:**")
+        st.write("Modifica parámetros en la sidebar y presiona 'Ejecutar Análisis' nuevamente")
         
-        # Conclusiones
-        st.subheader("🎯 Conclusiones del Análisis")
-        
-        excess_return_pct = (portfolio_metrics['Total Return'] - benchmark_metrics['Total Return'])
-        sharpe_improvement = portfolio_metrics['Sharpe Ratio'] - benchmark_metrics['Sharpe Ratio']
-        
-        if excess_return_pct > 0 and sharpe_improvement > 0:
-            conclusion_type = "success"
-            conclusion_text = "🏆 **ESTRATEGIA EXITOSA**"
-            details = f"""
-            La estrategia Random Forest + Markowitz superó al benchmark tanto en retorno 
-            (+{excess_return_pct:.2%}) como en ratio de Sharpe (+{sharpe_improvement:.3f} puntos).
-            
-            **Fortalezas identificadas:**
-            - Mejor gestión del riesgo (menor drawdown)
-            - Mayor consistencia en la generación de alfa
-            - Diversificación inteligente y adaptativa
-            """
-        elif excess_return_pct > 0:
-            conclusion_type = "warning"
-            conclusion_text = "⚠️ **ESTRATEGIA PARCIALMENTE EXITOSA**"
-            details = f"""
-            La estrategia generó mayor retorno (+{excess_return_pct:.2%}) pero con 
-            ratio de Sharpe similar al benchmark.
-            
-            **Áreas de mejora:**
-            - Optimizar la gestión de riesgo
-            - Ajustar parámetros de aversión al riesgo
-            - Considerar costos de transacción
-            """
-        else:
-            conclusion_type = "error"
-            conclusion_text = "❌ **ESTRATEGIA NO EXITOSA**"
-            details = f"""
-            La estrategia no logró superar al benchmark en el período analizado.
-            
-            **Posibles causas:**
-            - Sobreajuste en los modelos de ML
-            - Período de prueba desfavorable
-            - Parámetros sub-óptimos
-            - Costos de transacción no considerados
-            """
-        
-        if conclusion_type == "success":
-            st.success(conclusion_text)
-        elif conclusion_type == "warning":
-            st.warning(conclusion_text)
-        else:
-            st.error(conclusion_text)
-        
-        st.markdown(details)
-        
-        # Recomendaciones
-        st.markdown("#### 🚀 Recomendaciones para Mejoras:")
-        
-        recommendations = [
-            "**Modelos ML**: Probar XGBoost, LSTM o modelos ensemble más sofisticados",
-            "**Features**: Incorporar más variables macro y sentiment del mercado", 
-            "**Optimización**: Implementar Black-Litterman o modelos de factor",
-            "**Costos**: Incluir costos de transacción y market impact",
-            "**Robustez**: Validar en diferentes regímenes de mercado",
-            "**Frecuencia**: Evaluar diferentes frecuencias de rebalanceo"
-        ]
-        
-        for rec in recommendations:
-            st.markdown(f"- {rec}")
-        
-        # Footer con información técnica
-        st.markdown("---")
-        st.markdown(f"""
-        <div style='text-align: center; color: #666; font-size: 12px;'>
-            Análisis completado en {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 
-            {len(portfolio_returns)} observaciones de backtest | 
-            {len(models)} modelos Random Forest entrenados
-        </div>
-        """, unsafe_allow_html=True)
+        st.write("**🎓 Para uso en clases:**")
+        st.write("1. Ejecuta con diferentes parámetros")
+        st.write("2. Discute los resultados con alumnos")
+        st.write("3. Analiza por qué el RF funciona o no")
 
 if __name__ == "__main__":
     main()
