@@ -684,10 +684,6 @@ def main():
     
     st.success(f"✅ Backtesting completado: {len(portfolio_rets)} días, {n_periods} rebalanceos")
     
-    # RESTANTE DEL CÓDIGO (secciones 6-10) se mantiene igual...
-    # [Aquí irían las secciones 6-10 que muestran resultados, métricas, composición del portafolio, etc.]
-    # Por razones de espacio, mantengo solo las partes modificadas
-
     # SECCIÓN 6: RESULTADOS Y COMPARACIÓN
     st.header("📊 Resultados de la Estrategia")
     
@@ -822,6 +818,12 @@ def main():
     
     conclusion_emoji = "🏆" if excess_return > 0 and sharpe_diff > 0 else "⚠️" if excess_return > 0 else "📊"
     
+    # CORRECCIÓN: Usar f-string simple sin multilínea problemática
+    if asset_universe == "Portafolio Inteligente (6 mejores acciones)":
+        class_message = "Demuestra cómo la selección inteligente basada en ML puede mejorar significativamente los resultados de inversión."
+    else:
+        class_message = "Excelente ejemplo de aplicación práctica de machine learning en finanzas cuantitativas."
+    
     st.markdown(f"""
     ## {conclusion_emoji} **ANÁLISIS COMPLETADO**
     
@@ -831,11 +833,7 @@ def main():
     - 🔢 **Acciones analizadas:** {asset_prices.shape[1]}
     - 📅 **Período de backtesting:** {len(portfolio_rets)} días
     
-    **Para la clase:** {"""
-    Demuestra cómo la selección inteligente basada en ML puede mejorar significativamente los resultados de inversión.
-    """ if asset_universe == "Portafolio Inteligente (6 mejores acciones)" else """
-    Excelente ejemplo de aplicación práctica de machine learning en finanzas cuantitativas.
-    """}
+    **Para la clase:** {class_message}
     """)
 
 if __name__ == "__main__":
